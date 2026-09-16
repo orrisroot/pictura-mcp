@@ -5,6 +5,7 @@
 # Usage (as root):
 #   deploy/install-systemd.sh [PROJECT_ROOT] [SERVICE_USER] [PORT]
 #   default: PROJECT_ROOT = script's repo root, SERVICE_USER = pictura-mcp, PORT = 8000
+#   PORT seeds IMAGE_PORT in the env file (an existing IMAGE_PORT value wins).
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,9 +47,21 @@ fi
 if ! grep -q '^IMAGE_MODEL_CACHE_DIR=' "$ENV_FILE"; then
   printf 'IMAGE_MODEL_CACHE_DIR=%s/.model-cache\n' "$PROJECT_ROOT" >> "$ENV_FILE"
 fi
+# Serving: seed IMAGE_HOST (system-scope remote listener) / IMAGE_PORT.
+if ! grep -q '^IMAGE_HOST=' "$ENV_FILE"; then
+  printf 'IMAGE_HOST=0.0.0.0\n' >> "$ENV_FILE"
+fi
+if ! grep -q '^IMAGE_PORT=' "$ENV_FILE"; then
+  printf 'IMAGE_PORT=%s\n' "$PORT" >> "$ENV_FILE"
+fi
 CACHE_DIR="$(grep '^IMAGE_MODEL_CACHE_DIR=' "$ENV_FILE" | cut -d= -f2-)"
-mkdir -p "$CACHE_DIR"
-chown -R "$SERVICE_USER":"$SERVICE_USER" "$CACHE_DIR"
+# ReadWritePaths targets must exist for systemd mount-namespacing (writable by
+# the service user). The server itself writes only to the model cache (log file
+# is handled below); outputs/ is used by the manual --smoke run only.
+if [[ -n $CACHE_DIR ]]; then
+  mkdir -p "$CACHE_DIR"
+  chown -R "$SERVICE_USER":"$SERVICE_USER" "$CACHE_DIR"
+fi
 chmod o-w "$PROJECT_ROOT" 2>/dev/null || true   # keep project read-only for the service user
 chown "$SERVICE_USER":"$SERVICE_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -56,8 +69,20 @@ chmod 600 "$ENV_FILE"
 echo "==> render & install unit: $UNIT"
 sed -e "s#<PROJECT_ROOT>#$PROJECT_ROOT#g" \
     -e "s#<SERVICE_USER>#$SERVICE_USER#g" \
-    -e "s#--port 8000#--port $PORT#" \
     "$PROJECT_ROOT/deploy/pictura-mcp.service" > "$UNIT"
+# ProtectSystem=strict blocks writes outside ReadWritePaths; whitelist the
+# model cache dir (and log file, when set) so prefetch/download writes work.
+RW_PATHS=""
+if [[ -n $CACHE_DIR ]]; then RW_PATHS="$CACHE_DIR"; fi
+if grep -q '^IMAGE_LOG_FILE=' "$ENV_FILE"; then
+  LOG_FILE="$(grep '^IMAGE_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
+  [[ -n $RW_PATHS ]] && RW_PATHS="$RW_PATHS $LOG_FILE" || RW_PATHS="$LOG_FILE"
+fi
+if [[ -n $RW_PATHS ]]; then
+  sed -i "s#^ReadWritePaths=.*#ReadWritePaths=$RW_PATHS#" "$UNIT"
+else
+  sed -i "s#^ReadWritePaths=.*#ReadWritePaths=#" "$UNIT"
+fi
 # PICTURA_MCP_TOKEN in the unit comes from the env file; keep logrotate path hint.
 if grep -q '^IMAGE_LOG_FILE=' "$ENV_FILE"; then
   LOG_FILE="$(grep '^IMAGE_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
