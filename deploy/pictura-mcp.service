@@ -12,11 +12,11 @@ User=<SERVICE_USER>
 Group=<SERVICE_USER>
 WorkingDirectory=<PROJECT_ROOT>
 # Token / model / cache / log settings come from this env file (owned by the service user).
-EnvironmentFile=<PROJECT_ROOT>/deploy/image-mcp.env
+EnvironmentFile=<PROJECT_ROOT>/deploy/pictura-mcp.env
 # Read-write areas for the service user only (cache, logs, outputs as needed).
 ReadWritePaths=<PROJECT_ROOT>/outputs
 ExecStart=<PROJECT_ROOT>/.venv/bin/python \
-    <PROJECT_ROOT>/server/image_server.py \
+    <PROJECT_ROOT>/server/pictura_server.py \
     --transport http \
     --host 0.0.0.0 \
     --port 8000

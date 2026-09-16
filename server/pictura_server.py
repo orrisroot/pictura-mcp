@@ -11,7 +11,7 @@ Configuration (environment variables):
     IMAGE_VAE         Optional VAE model id to attach (e.g. for SDXL fp16 fixes)
     IMAGE_DEVICE      cuda | cpu (default: cuda if available else cpu)
     IMAGE_CUDA_DEVICE          restrict CUDA GPUs, e.g. "0" or "0,1" (=> CUDA_VISIBLE_DEVICES)
-    IMAGE_LOG_FILE             append [image-mcp] logs to this file (default: stderr)
+    IMAGE_LOG_FILE             append [pictura-mcp] logs to this file (default: stderr)
     IMAGE_MODEL_CACHE_DIR         model download/cache directory (default: HF cache)
     IMAGE_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
     IMAGE_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
@@ -38,13 +38,13 @@ Transports / remote access (CLI):
                                  ~1.6 MB outputs and camera JPEGs. Raise only if
                                  you really need to pass very large images.
     --token <token>              require "Authorization: Bearer <token>" on http/sse
-    --log-file <path>            append [image-mcp] logs to a file (default: stderr)
+    --log-file <path>            append [pictura-mcp] logs to a file (default: stderr)
 
 Run:
-    ./.venv/bin/python server/image_server.py                     # stdio MCP server
-    ./.venv/bin/python server/image_server.py --transport http \
+    ./.venv/bin/python server/pictura_server.py                     # stdio MCP server
+    ./.venv/bin/python server/pictura_server.py --transport http \
         --host 0.0.0.0 --port 8000 --token sekrit               # remote HTTP server
-    ./.venv/bin/python server/image_server.py --smoke            # self-test (no MCP)
+    ./.venv/bin/python server/pictura_server.py --smoke            # self-test (no MCP)
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ for _name in ("httpx", "huggingface_hub", "mcp", "uvicorn", "starlette", "asynci
 # See README/SPEC for the privacy guarantee.
 
 # ---- log destination ------------------------------------------------------
-# IMAGE_LOG_FILE / --log-file redirect the [image-mcp] log to a file (append),
+# IMAGE_LOG_FILE / --log-file redirect the [pictura-mcp] log to a file (append),
 # reopened on SIGHUP so logrotate (postrotate kill -HUP) keeps working.
 _LOG_FH = None
 _LOG_PATH: str | None = None
@@ -98,7 +98,7 @@ def _set_log_file(path: str | None) -> None:
         _log(f"log file: {p} (0640, group r)")
     except OSError as e:
         _LOG_FH = None
-        print(f"[image-mcp] cannot open log file {path}: {e}", file=sys.stderr, flush=True)
+        print(f"[pictura-mcp] cannot open log file {path}: {e}", file=sys.stderr, flush=True)
 
 
 def _reopen_log() -> None:
@@ -110,7 +110,7 @@ def _reopen_log() -> None:
 def _log(msg: str) -> None:
     # Progress/debug. Writes to the configured log file, else stderr (never to
     # the MCP stdio channel, which is reserved for protocol messages).
-    line = f"[image-mcp] {msg}"
+    line = f"[pictura-mcp] {msg}"
     if _LOG_FH is not None:
         try:
             _LOG_FH.write(line + "\n")
@@ -1204,15 +1204,15 @@ def main() -> int:  # noqa: C901
     parser.add_argument(
         "--token",
         default=None,
-        help="require Bearer token on http/sse (falls back to $IMAGE_MCP_TOKEN)",
+        help="require Bearer token on http/sse (falls back to $PICTURA_MCP_TOKEN)",
     )
     parser.add_argument(
         "--log-file",
         default=os.environ.get("IMAGE_LOG_FILE"),
-        help="append [image-mcp] logs to a file (default: stderr / journald)",
+        help="append [pictura-mcp] logs to a file (default: stderr / journald)",
     )
     args = parser.parse_args()
-    token = args.token or os.environ.get("IMAGE_MCP_TOKEN")
+    token = args.token or os.environ.get("PICTURA_MCP_TOKEN")
     _set_log_file(args.log_file)
     # logrotate support: reopen the configured log file on SIGHUP.
     try:

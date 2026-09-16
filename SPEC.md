@@ -3,7 +3,7 @@
 Status: **final** (all behavior is implemented, tested on a consumer GPU)
 
 This document is the authoritative specification of `pictura-mcp`. It
-covers the image-gen backend (`server/image_server.py`) and how to connect any
+covers the image-gen backend (`server/pictura_server.py`) and how to connect any
 MCP client (stdio, streamable HTTP, SSE).
 
 ---
@@ -13,7 +13,7 @@ MCP client (stdio, streamable HTTP, SSE).
 Local, GPU-backed image generation wrapped as an MCP server:
 
 ```
-any MCP client/harness --(stdio | streamable HTTP | SSE)--> image_server.py
+any MCP client/harness --(stdio | streamable HTTP | SSE)--> pictura_server.py
                                                         │
                                  diffusers (Stable Diffusion XL) ──┴─▶ local GPU
 ```
@@ -146,7 +146,7 @@ with a clear error.
 ## 4. Transports & CLI
 
 ```
-python server/image_server.py [options]
+python server/pictura_server.py [options]
 ```
 
 | Flag | Default | Meaning |
@@ -165,7 +165,7 @@ python server/image_server.py [options]
 
 ## 5. Security
 
-- **Remote transports require a bearer token** (see §6 `IMAGE_MCP_TOKEN`) when
+- **Remote transports require a bearer token** (see §6 `PICTURA_MCP_TOKEN`) when
   the server is exposed beyond localhost. The GPU is otherwise reachable by any
   caller.
 - **Arbitrary-path writes are impossible**: tools accept no output path; the
@@ -186,8 +186,8 @@ python server/image_server.py [options]
 | `IMAGE_VAE` | unset | optional VAE override |
 | `IMAGE_DEVICE` | `cuda` | `cuda` or `cpu` (auto-fallback to cpu) |
 | `IMAGE_CUDA_DEVICE` | unset | restrict CUDA GPU(s) (`0`, `0,1`) → `CUDA_VISIBLE_DEVICES` |
-| `IMAGE_LOG_FILE` | unset (stderr) | append `[image-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
-| `IMAGE_MCP_TOKEN` | unset | bearer token; fallback when `--token` not given |
+| `IMAGE_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
+| `PICTURA_MCP_TOKEN` | unset | bearer token; fallback when `--token` not given |
 | `IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse |
 | `IMAGE_MODEL_CACHE_DIR` | HF cache | model download/cache directory |
 | `IMAGE_LORA_ALLOWLIST` | built-in default | override LoRA allowlist (comma-separated; `*` = any `org/repo`) |
@@ -217,7 +217,7 @@ bound to any client. Every client stores server definitions in the same shape:
   "mcpServers": {
     "generate-image": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
-      "args": ["<PROJECT_ROOT>/server/image_server.py"],
+      "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": { "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" }
     }
   }
@@ -252,16 +252,16 @@ block above is identical regardless of harness.
 **Tracked vs gitignored:** only templates are committed. Real configs and
 artifacts are gitignored and created locally on each machine (see §11): the
 client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real paths),
-`deploy/image-mcp.env` (secrets), `.venv/`, and `outputs/`.
+`deploy/pictura-mcp.env` (secrets), `.venv/`, and `outputs/`.
 
 - **Venv**: `.venv` (@ Python 3.14 + torch 2.14 CUDA). Rebuild with
   `server/requirements.txt`.
 - **systemd (recommended for long-running / remote)**: can run under a
   **dedicated service account**. `deploy/install-systemd.sh <PROJECT_ROOT>
   [SERVICE_USER] [PORT]` (root) creates the unprivileged account, prepares the
-  model cache/log dirs, renders `deploy/image-mcp.service` (system unit with
+  model cache/log dirs, renders `deploy/pictura-mcp.service` (system unit with
   `User=`/`Group=` + hardening) and enables it. The env file
-  (`deploy/image-mcp.env`, gitignored) holds the token/model/cache/log settings.
+  (`deploy/pictura-mcp.env`, gitignored) holds the token/model/cache/log settings.
 - **One process at a time**: keeping several servers alive exhausts VRAM and
   causes CUDA OOM. Use systemd instead of ad-hoc background processes.
 
@@ -288,21 +288,21 @@ COMPARISON.md                    # vs other image-gen MCPs
 deploy/
   mcp.json.example               # client config TEMPLATE (project .mcp.json)
   mcp.remote.json.example        # HTTP client config TEMPLATE
-  image-mcp.service              # systemd system-unit TEMPLATE (service account)
+  pictura-mcp.service              # systemd system-unit TEMPLATE (service account)
   install-systemd.sh             # root installer: account + dirs + unit
-  image-mcp.env.example          # env TEMPLATE (token/model/cache/log)
+  pictura-mcp.env.example          # env TEMPLATE (token/model/cache/log)
   logrotate.example              # logrotate config (copytruncate + SIGHUP option)
 server/
-  image_server.py                # MCP image server (the implementation)
+  pictura_server.py                # MCP image server (the implementation)
   requirements.txt               # python deps
 .gitignore
 ```
 **You must make these yourself on each machine (after cloning):**
 ```
 .mcp.json                        # YOUR client config - copy deploy/mcp.json.example and fill in
-deploy/image-mcp.env            # YOUR secrets - copy deploy/image-mcp.env.example, set the token
+deploy/pictura-mcp.env            # YOUR secrets - copy deploy/pictura-mcp.env.example, set the token
 .venv/                           # python env - create with: python3 -m venv .venv (+ pip install -r server/requirements.txt)
-outputs/                         # created automatically later by: server/image_server.py --smoke
+outputs/                         # created automatically later by: server/pictura_server.py --smoke
 ```
 The exact steps live in the README (Setup → Repo layout note). Git tracking
 policy (.gitignore) is not part of this spec.

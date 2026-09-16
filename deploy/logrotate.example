@@ -1,13 +1,13 @@
-# logrotate example for the image-mcp server.
-# Install as /etc/logrotate.d/image-mcp (root) and adjust the path / user / group.
+# logrotate example for the pictura-mcp server.
+# Install as /etc/logrotate.d/pictura-mcp (root) and adjust the path / user / group.
 #
 # Ownership model:
-#   - the service account (image-mcp) is the WRITER/owner of the log,
-#   - readers are: root AND members of the log group (here: image-mcp).
-# Add non-root operators to the group once:  sudo usermod -aG image-mcp <operator>
-# (or use the distro 'adm' group instead: create 0640 image-mcp adm)
+#   - the service account (pictura-mcp) is the WRITER/owner of the log,
+#   - readers are: root AND members of the log group (here: pictura-mcp).
+# Add non-root operators to the group once:  sudo usermod -aG pictura-mcp <operator>
+# (or use the distro 'adm' group instead: create 0640 pictura-mcp adm)
 
-/var/log/image-mcp.log {
+/var/log/pictura-mcp.log {
     weekly
     rotate 4
     missingok
@@ -17,7 +17,7 @@
 
     # Recreate the rotated-in file with the same owner/group/permissions so
     # the service user can keep writing and operators can keep reading.
-    create 0640 image-mcp image-mcp
+    create 0640 pictura-mcp pictura-mcp
 
     # OPTION A (recommended, simplest): copytruncate lets the running server
     # keep writing to the same inode - no restart or signal needed.
@@ -26,6 +26,6 @@
     # OPTION B (only if you remove copytruncate above):
     # the server reopens its log file on SIGHUP after rotation:
     # postrotate
-    #     pkill -HUP -f "server/image_server.py" || true
+    #     pkill -HUP -f "server/pictura_server.py" || true
     # endscript
 }

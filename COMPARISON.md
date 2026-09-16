@@ -5,7 +5,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 
 ## 1. Comparison at a glance
 
-| Dimension | **This project** (`image_server.py`) | **ComfyUI MCP** (`comfyui-mcp`) | **Stability AI** (official MCP, API) | **WaveSpeed MCP** | **fal.ai MCP** |
+| Dimension | **This project** (`pictura_server.py`) | **ComfyUI MCP** (`comfyui-mcp`) | **Stability AI** (official MCP, API) | **WaveSpeed MCP** | **fal.ai MCP** |
 |---|---|---|---|---|---|
 | Generation engine | local **diffusers** (SDXL default) | local **ComfyUI** (must run separately) | Stability **cloud API** (local-core option exists) | WaveSpeed **cloud API** | fal.ai **cloud API** |
 | Self-contained | ✅ yes (no external app) | ❌ requires ComfyUI + Python env + models | ❌ needs Stability account | ❌ needs API key | ❌ needs API key |

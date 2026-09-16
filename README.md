@@ -4,12 +4,12 @@ A **local, GPU-backed image generation MCP server** (codename `pictura-mcp`) exp
 MCP client** — Claude Desktop, Cursor, VS Code, Windsurf, Claude Code, etc.
 
 ```
-any MCP client ──(stdio | streamable HTTP | SSE)──▶ image_server.py (Python)
+any MCP client ──(stdio | streamable HTTP | SSE)──▶ pictura_server.py (Python)
                                                           │
                                    diffusers (SDXL) ───────┴─▶ local GPU
 ```
 
-- **Server**: `server/image_server.py` — a standard MCP server (stdio / HTTP /
+- **Server**: `server/pictura_server.py` — a standard MCP server (stdio / HTTP /
   SSE) running Stable Diffusion via Hugging Face `diffusers`.
 - **Client**: whatever MCP client you already use. Examples for several clients
   are in § [Client configuration](#client-configuration).
@@ -42,17 +42,17 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r server/requirements.txt
 
 # 2) Smoke test (downloads the model, ~5GB, on first run)
-./.venv/bin/python server/image_server.py --smoke
+./.venv/bin/python server/pictura_server.py --smoke
 # -> OK if outputs/smoke_test.png is created
 
 # 3) Connect from your MCP client (see below)
 ```
 
 > **Repo layout note (gitignored files).** The committed repository ships
-> **templates** (`deploy/mcp.json.example`, `deploy/image-mcp.env.example`,
-> `deploy/image-mcp.service`). Local files that are **gitignored** and created
+> **templates** (`deploy/mcp.json.example`, `deploy/pictura-mcp.env.example`,
+> `deploy/pictura-mcp.service`). Local files that are **gitignored** and created
 > per machine: your real client config (e.g. `.mcp.json` — copy from
-> `deploy/mcp.json.example`, replace `<PROJECT_ROOT>`), `deploy/image-mcp.env`
+> `deploy/mcp.json.example`, replace `<PROJECT_ROOT>`), `deploy/pictura-mcp.env`
 > (secrets — never commit), plus `.venv/` and `outputs/`.
 
 ## Client configuration
@@ -65,7 +65,7 @@ Every MCP client stores server definitions in the same shape
   "mcpServers": {
     "generate-image": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
-      "args": ["<PROJECT_ROOT>/server/image_server.py"],
+      "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": { "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" }
     }
   }
@@ -97,7 +97,7 @@ You can also run the server as an independent process that clients reach over
 **HTTP (streamable HTTP)** or **SSE**:
 
 ```bash
-./.venv/bin/python server/image_server.py \
+./.venv/bin/python server/pictura_server.py \
   --transport http \
   --host 0.0.0.0 \
   --port 8000 \
@@ -106,7 +106,7 @@ You can also run the server as an independent process that clients reach over
 
 - `--transport http` (endpoint `/mcp`) or `--transport sse` (endpoint `/sse`);
   `--host 127.0.0.1` is the safe default — use `0.0.0.0` for remote clients
-- `--token <token>` (or env `IMAGE_MCP_TOKEN`) requires
+- `--token <token>` (or env `PICTURA_MCP_TOKEN`) requires
   `Authorization: Bearer <token>` on every request; **always set it when the
   server is reachable beyond localhost**
 - `--max-body-mb <MB>` (default 16) caps the HTTP request body; base64 images
@@ -135,17 +135,17 @@ There are two ways to run it as a service.
 
 ```bash
 # As root - creates the service user, prepares dirs, renders & installs the unit
-sudo deploy/install-systemd.sh /absolute/path/to/this/repo image-mcp 8000
-#   then edit deploy/image-mcp.env (token, model, IMAGE_CUDA_DEVICE,
-#   IMAGE_LOG_FILE, IMAGE_MODEL_CACHE_DIR) and: sudo systemctl restart image-mcp
-sudo systemctl status image-mcp
+sudo deploy/install-systemd.sh /absolute/path/to/this/repo pictura-mcp 8000
+#   then edit deploy/pictura-mcp.env (token, model, IMAGE_CUDA_DEVICE,
+#   IMAGE_LOG_FILE, IMAGE_MODEL_CACHE_DIR) and: sudo systemctl restart pictura-mcp
+sudo systemctl status pictura-mcp
 ```
 
-This runs under the unprivileged `image-mcp` system account with hardening
+This runs under the unprivileged `pictura-mcp` system account with hardening
 (`NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, …). The model cache and log
-paths in `deploy/image-mcp.env` are created/owned by that account (**log file is
+paths in `deploy/pictura-mcp.env` are created/owned by that account (**log file is
 0640, owner = service account, group = service account**). Non-root operators
-read the log by joining the group once: `sudo usermod -aG image-mcp <username>`
+read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>`
 (then log out/in). If the service crashes at startup, remove
 `MemoryDenyWriteExecute=true` from the unit (torch sometimes conflicts) and
 `systemctl daemon-reload && restart`.
@@ -153,14 +153,14 @@ read the log by joining the group once: `sudo usermod -aG image-mcp <username>`
 **B) Current user (user scope, quick):**
 
 ```bash
-cp deploy/image-mcp.env.example deploy/image-mcp.env   # set IMAGE_MCP_TOKEN
-chmod 600 deploy/image-mcp.env
+cp deploy/pictura-mcp.env.example deploy/pictura-mcp.env   # set PICTURA_MCP_TOKEN
+chmod 600 deploy/pictura-mcp.env
 mkdir -p ~/.config/systemd/user
 sed 's#<PROJECT_ROOT>#/absolute/path/to/this/repo#' \
-  deploy/image-mcp.service > ~/.config/systemd/user/image-mcp.service
+  deploy/pictura-mcp.service > ~/.config/systemd/user/pictura-mcp.service
 # remove the User= / Group= lines for a user unit
-systemctl --user daemon-reload && systemctl --user enable --now image-mcp
-systemctl --user status image-mcp
+systemctl --user daemon-reload && systemctl --user enable --now pictura-mcp
+systemctl --user status pictura-mcp
 ```
 
 Log rotation: `deploy/logrotate.example` (copytruncate, or SIGHUP postrotate).
@@ -202,7 +202,7 @@ ControlNet is SDXL-only, so switch to an SD1.5 checkpoint for fast/lightweight
   "mcpServers": {
     "generate-image": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
-      "args": ["<PROJECT_ROOT>/server/image_server.py"],
+      "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": {
         "IMAGE_MODEL": "stable-diffusion-v1-5/stable-diffusion-v1-5",
         "IMAGE_LORA_ALLOWLIST": "*"          // or e.g. "some/org/sd15-style-lora"
@@ -216,7 +216,7 @@ ControlNet is SDXL-only, so switch to an SD1.5 checkpoint for fast/lightweight
 # one-off run for SD1.5
 IMAGE_MODEL=stable-diffusion-v1-5/stable-diffusion-v1-5 \
 IMAGE_LORA_ALLOWLIST='*' \
-./.venv/bin/python server/image_server.py --transport http --token <TOKEN>
+./.venv/bin/python server/pictura_server.py --transport http --token <TOKEN>
 ```
 
 - Defaults become **512×512 / 30 steps**, generation ≈ 3 s @512/25.
@@ -245,7 +245,7 @@ model copy). `--smoke` also exercises the img2img path.
 - GPU selection: set `IMAGE_CUDA_DEVICE` (e.g. `0` or `0,1`) to restrict which
   CUDA GPU(s) the server uses (`CUDA_VISIBLE_DEVICES`).
 - Log destination: set `IMAGE_LOG_FILE` (or `--log-file <path>`) to append the
-  `[image-mcp]` log to a file instead of stderr/journald (handy for systemd).
+  `[pictura-mcp]` log to a file instead of stderr/journald (handy for systemd).
   Logrotate-ready: the server reopens its log file on `SIGHUP`, and a
   `copytruncate`-based config is provided in `deploy/logrotate.example`.
   **Privacy: user prompts and tool arguments are never written to any log.**
