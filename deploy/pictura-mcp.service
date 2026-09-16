@@ -38,7 +38,9 @@ ProtectClock=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictNamespaces=true
-MemoryDenyWriteExecute=true   # note: torch/uvicorn may need this disabled
+# MemoryDenyWriteExecute: torch/uvicorn may conflict; remove this line
+# and daemon-reload if the service crashes at startup.
+MemoryDenyWriteExecute=true
 LockPersonality=true
 
 Restart=on-failure
