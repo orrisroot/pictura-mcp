@@ -69,6 +69,16 @@ to torch 2.11.x, and all other deps only require torch≥2.6.) Verify with
 `./.venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"`
 — expect e.g. `2.11.0+cu128` and `True`.
 
+**Volta (V100, compute capability 7.0):** use torch ≤2.7.1 with the cu126
+index — newer builds (cu128 / cu126 2.9+ / cu130) dropped the sm_70 kernels
+and generation fails with `CUDA error: no kernel image is available`:
+
+```bash
+./.venv/bin/pip install "torch==2.7.1" "torchvision==0.22.1" "torchaudio" \
+    --index-url https://download.pytorch.org/whl/cu126
+./.venv/bin/pip install -r server/requirements.txt   # keeps 2.7.1+cu126
+```
+
 > **Repo layout note (gitignored files).** The committed repository ships
 > **templates** (`deploy/mcp.json.example`, `deploy/pictura-mcp.env.example`,
 > `deploy/pictura-mcp.service`). Local files that are **gitignored** and created
