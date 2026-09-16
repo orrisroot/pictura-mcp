@@ -17,6 +17,11 @@ UNIT="${4:-/etc/systemd/system/pictura-mcp.service}"
 if [[ $EUID -ne 0 ]]; then
   echo "error: run as root" >&2; exit 1
 fi
+if [[ ! -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+  echo "error: $PROJECT_ROOT/.venv/bin/python not found -" >&2
+  echo "       run README §Setup step 1 first (python3 -m venv .venv && pip install -r server/requirements.txt)" >&2
+  exit 1
+fi
 
 echo "==> service account: $SERVICE_USER"
 if id "$SERVICE_USER" &>/dev/null; then
@@ -84,7 +89,6 @@ if [[ -n $RW_PATHS ]]; then
 else
   sed -i "s#^ReadWritePaths=.*#ReadWritePaths=#" "$UNIT"
 fi
-# PICTURA_MCP_TOKEN in the unit comes from the env file; keep logrotate path hint.
 if grep -q '^IMAGE_LOG_FILE=' "$ENV_FILE"; then
   LOG_FILE="$(grep '^IMAGE_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
   LOG_DIR="$(dirname "$LOG_FILE")"
@@ -97,11 +101,30 @@ if grep -q '^IMAGE_LOG_FILE=' "$ENV_FILE"; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now pictura-mcp
-systemctl status pictura-mcp --no-pager || true
+# register boot-autostart only; the operator starts after reviewing the env file
+systemctl enable pictura-mcp
+if systemctl is-active --quiet pictura-mcp; then
+  echo "NOTE: already running; restart after env edits: systemctl restart pictura-mcp"
+fi
 echo
-echo "Done. COMMON FOLLOW-UPS:"
-echo "  - set PICTURA_MCP_TOKEN / IMAGE_MODEL / IMAGE_CUDA_DEVICE / IMAGE_LOG_FILE in $ENV_FILE, then: systemctl restart pictura-mcp"
+echo "Done. NEXT STEPS:"
+echo "  1. review the env file - the token is already randomized and the essentials"
+echo "     (IMAGE_MODEL_CACHE_DIR / IMAGE_HOST / IMAGE_PORT) are pre-seeded;"
+echo "     edit only what needs changing:"
+echo "        sudoedit $ENV_FILE"
+echo "  2. start the service:"
+echo "        systemctl start pictura-mcp"
+PORT_EFF="$(grep '^IMAGE_PORT=' "$ENV_FILE" | cut -d= -f2-)"
+PORT_EFF="${PORT_EFF:-$PORT}"
+echo "  3. verify - watch the log until 'MCP http server: http://...:${PORT_EFF}/mcp'"
+echo "     and 'Model ready' appear:"
+echo "        journalctl -u pictura-mcp -f"
+echo "  4. point your MCP client at http://<this-box-ip>:${PORT_EFF}/mcp with the"
+echo "     bearer token from PICTURA_MCP_TOKEN in $ENV_FILE"
+echo "     (template: deploy/mcp.remote.json.example)"
+echo "  5. open the port in your firewall if remote machines must reach the GPU box."
+echo
+echo "More follow-ups:"
 echo "  - logs: journalctl -u pictura-mcp -f   (or IMAGE_LOG_FILE when set)"
 echo "  - TO READ THE LOG FILE AS A NON-ROOT OPERATOR, add them to the log group:"
 echo "        sudo usermod -aG $SERVICE_USER <your-username>   # then re-login"

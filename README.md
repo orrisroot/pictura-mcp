@@ -150,16 +150,41 @@ Remote client config (`deploy/mcp.remote.json.example`):
 
 ### systemd (recommended for long-running / remote)
 
+Prerequisite: §Setup step 1 above — the `.venv`+dependencies must exist at
+`<PROJECT_ROOT>/.venv` (the service runs that interpreter). The manual smoke
+test is optional here; the systemd service does its own model download +
+prefetch on first start.
+
 There are two ways to run it as a service.
 
 **A) Dedicated service account (system scope, recommended):**
 
 ```bash
 # As root - creates the service user, prepares dirs, renders & installs the unit
+# (boot-autostart is registered but the service is NOT started)
 sudo deploy/install-systemd.sh /absolute/path/to/this/repo pictura-mcp 8000
-#   then edit deploy/pictura-mcp.env (token, model, IMAGE_CUDA_DEVICE,
-#   IMAGE_MODEL_CACHE_DIR, IMAGE_HOST, IMAGE_PORT, IMAGE_LOG_FILE) and:
-#   sudo systemctl restart pictura-mcp
+```
+
+The installer prints the next steps; the essentials are already prepared:
+
+- `deploy/pictura-mcp.env` is created from the template with an
+  **auto-randomized `PICTURA_MCP_TOKEN`**, and `IMAGE_MODEL_CACHE_DIR` /
+  `IMAGE_HOST=0.0.0.0` / `IMAGE_PORT` are **pre-seeded** — edit only what needs
+  changing (`sudoedit deploy/pictura-mcp.env`; e.g. `IMAGE_MODEL`,
+  `IMAGE_CUDA_DEVICE`, `IMAGE_LOG_FILE`)
+- start and verify:
+
+```bash
+sudo systemctl start pictura-mcp
+journalctl -u pictura-mcp -f
+# wait for:  MCP http server: http://0.0.0.0:8000/mcp ... Model ready (...)
+
+# client config: copy deploy/mcp.remote.json.example and set
+#   url: http://<this-box-ip>:8000/mcp   (port = IMAGE_PORT from the env file)
+#   Authorization: Bearer <PICTURA_MCP_TOKEN from deploy/pictura-mcp.env>
+```
+
+```bash
 sudo systemctl status pictura-mcp
 ```
 
