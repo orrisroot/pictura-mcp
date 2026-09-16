@@ -255,7 +255,8 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 `deploy/pictura-mcp.env` (secrets), `.venv/`, and `outputs/`.
 
 - **Venv**: `.venv` (@ Python 3.14 + torch 2.14 CUDA). Rebuild with
-  `server/requirements.txt`.
+  `server/requirements.txt`. For CUDA-12.8-driver machines, install the
+  `cu128` torch build first (torch 2.11.0, see `server/requirements-cu128.txt`).
 - **systemd (recommended for long-running / remote)**: can run under a
   **dedicated service account**. `deploy/install-systemd.sh <PROJECT_ROOT>
   [SERVICE_USER] [PORT]` (root) creates the unprivileged account, prepares the

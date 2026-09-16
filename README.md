@@ -48,6 +48,27 @@ python3 -m venv .venv
 # 3) Connect from your MCP client (see below)
 ```
 
+### CUDA driver version
+
+The default install above pulls the latest torch from PyPI, whose wheels are
+built for **CUDA 13** (`cu130`) — this needs a CUDA-13-capable driver
+(**≥ 580**). Check yours with `nvidia-smi` (top-right corner).
+
+If your driver only supports up to **CUDA 12.8** (e.g. 570.x drivers), install
+the `cu128` torch build instead — same code, older CUDA runtime:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/pip install "torch==2.11.0" "torchvision" \
+    --index-url https://download.pytorch.org/whl/cu128
+./.venv/bin/pip install -r server/requirements.txt   # keeps 2.11.0+cu128
+```
+
+(`server/requirements-cu128.txt` documents this variant; cu128 wheels exist up
+to torch 2.11.x, and all other deps only require torch≥2.6.) Verify with
+`./.venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"`
+— expect e.g. `2.11.0+cu128` and `True`.
+
 > **Repo layout note (gitignored files).** The committed repository ships
 > **templates** (`deploy/mcp.json.example`, `deploy/pictura-mcp.env.example`,
 > `deploy/pictura-mcp.service`). Local files that are **gitignored** and created
