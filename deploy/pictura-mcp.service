@@ -28,7 +28,6 @@ ExecStart=<PROJECT_ROOT>/.venv/bin/python \
 # ---- hardening ------------------------------------------------------------
 NoNewPrivileges=true
 PrivateTmp=true
-PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 ProtectKernelTunables=true
@@ -38,9 +37,6 @@ ProtectClock=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictNamespaces=true
-# MemoryDenyWriteExecute: torch/uvicorn may conflict; remove this line
-# and daemon-reload if the service crashes at startup.
-MemoryDenyWriteExecute=true
 LockPersonality=true
 
 Restart=on-failure
