@@ -167,7 +167,11 @@ This runs under the unprivileged `pictura-mcp` system account with hardening
 (`NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, …). `ProtectSystem=strict`
 makes the FS read-only, so the installer whitelists the model cache dir and log
 file in `ReadWritePaths` (derived from `deploy/pictura-mcp.env`; log file is
-0640, owner = service account, group = service account). If you later change
+0640, owner = service account, group = service account). The installer also
+activates commented-out defaults in the env file (`IMAGE_MODEL_CACHE_DIR`,
+`IMAGE_HOST`, `IMAGE_PORT`) — the HF default cache in the service user's home
+directory stays read-only under `ProtectSystem=strict`, so a cache dir must
+always be set or model prefetch keeps re-downloading. If you later change
 `IMAGE_MODEL_CACHE_DIR` / `IMAGE_LOG_FILE`, re-run the installer (it re-renders
 the unit and restarts the service). Non-root operators
 read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>`

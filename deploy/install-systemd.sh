@@ -43,21 +43,22 @@ if [[ ! -f "$ENV_FILE" ]]; then
   cp "$PROJECT_ROOT/deploy/pictura-mcp.env.example" "$ENV_FILE"
   sed -i "s/^PICTURA_MCP_TOKEN=.*/PICTURA_MCP_TOKEN=$(head -c24 /dev/urandom | base64 | tr -d '/+=')/" "$ENV_FILE"
 fi
-# Ensure a writable model cache owned by the service user.
-if ! grep -q '^IMAGE_MODEL_CACHE_DIR=' "$ENV_FILE"; then
-  printf 'IMAGE_MODEL_CACHE_DIR=%s/.model-cache\n' "$PROJECT_ROOT" >> "$ENV_FILE"
-fi
-# Serving: seed IMAGE_HOST (system-scope remote listener) / IMAGE_PORT.
-if ! grep -q '^IMAGE_HOST=' "$ENV_FILE"; then
-  printf 'IMAGE_HOST=0.0.0.0\n' >> "$ENV_FILE"
-fi
-if ! grep -q '^IMAGE_PORT=' "$ENV_FILE"; then
-  printf 'IMAGE_PORT=%s\n' "$PORT" >> "$ENV_FILE"
-fi
+# seed_env KEY VALUE: skip when active; activate the "# KEY=..." template line; append otherwise.
+seed_env() {
+  local key="$1" val="$2"
+  grep -q "^${key}=" "$ENV_FILE" && return 0
+  if grep -q "^# ${key}=" "$ENV_FILE"; then
+    sed -i "s|^# ${key}=.*|${key}=${val}|" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+  fi
+}
+# HF default cache (~/.cache) is read-only under ProtectSystem=strict.
+seed_env IMAGE_MODEL_CACHE_DIR "$PROJECT_ROOT/.model-cache"
 CACHE_DIR="$(grep '^IMAGE_MODEL_CACHE_DIR=' "$ENV_FILE" | cut -d= -f2-)"
-# ReadWritePaths targets must exist for systemd mount-namespacing (writable by
-# the service user). The server itself writes only to the model cache (log file
-# is handled below); outputs/ is used by the manual --smoke run only.
+seed_env IMAGE_HOST 0.0.0.0
+seed_env IMAGE_PORT "$PORT"
+# server writes only to the model cache at runtime (--smoke is a manual run).
 if [[ -n $CACHE_DIR ]]; then
   mkdir -p "$CACHE_DIR"
   chown -R "$SERVICE_USER":"$SERVICE_USER" "$CACHE_DIR"
