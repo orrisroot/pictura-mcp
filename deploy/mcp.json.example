@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "generate-image": {
+      "command": "<PROJECT_ROOT>/.venv/bin/python",
+      "args": ["<PROJECT_ROOT>/server/image_server.py"],
+      "env": {
+        "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0"
+      }
+    }
+  }
+}

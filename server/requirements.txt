@@ -1,0 +1,11 @@
+# Image generation MCP server deps (local GPU, low-VRAM friendly)
+# Install:  python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+torch>=2.14
+diffusers>=0.40
+transformers>=5.17
+accelerate>=1.15
+safetensors>=0.8
+pillow>=12
+mcp>=2.2
+peft>=0.21
+ultralytics>=8

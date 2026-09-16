@@ -1,0 +1,15 @@
+# Local MCP client config dot-dirs are gitignored (client-specific);
+# the canonical shared client template is deploy/mcp.json.example
+.pi/
+deploy/image-mcp.env
+
+# Python venv / deps / generated images
+.venv/
+outputs/
+**/node_modules/
+__pycache__/
+*.pyc
+
+# Misc
+.DS_Store
+*.log

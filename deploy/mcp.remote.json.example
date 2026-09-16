@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "generate-image": {
+      "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <TOKEN>"
+      },
+      "toolPrefix": ""
+    }
+  }
+}

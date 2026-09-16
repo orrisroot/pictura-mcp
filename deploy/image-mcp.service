@@ -1,0 +1,44 @@
+# Template: system-level systemd unit running as a dedicated service account.
+# Replace <PROJECT_ROOT> and <SERVICE_USER> (or use deploy/install-systemd.sh).
+[Unit]
+Description=Image generation MCP server (Stable Diffusion on a local GPU)
+Documentation=file://<PROJECT_ROOT>/README.md
+After=network.target
+
+[Service]
+Type=simple
+# Run under a dedicated, unprivileged service account (create it first).
+User=<SERVICE_USER>
+Group=<SERVICE_USER>
+WorkingDirectory=<PROJECT_ROOT>
+# Token / model / cache / log settings come from this env file (owned by the service user).
+EnvironmentFile=<PROJECT_ROOT>/deploy/image-mcp.env
+# Read-write areas for the service user only (cache, logs, outputs as needed).
+ReadWritePaths=<PROJECT_ROOT>/outputs
+ExecStart=<PROJECT_ROOT>/.venv/bin/python \
+    <PROJECT_ROOT>/server/image_server.py \
+    --transport http \
+    --host 0.0.0.0 \
+    --port 8000
+
+# ---- hardening ------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true   # note: torch/uvicorn may need this disabled
+LockPersonality=true
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
