@@ -11,11 +11,13 @@ Configuration (environment variables):
     IMAGE_VAE         Optional VAE model id to attach (e.g. for SDXL fp16 fixes)
     IMAGE_DEVICE      cuda | cpu (default: cuda if available else cpu)
     IMAGE_CUDA_DEVICE          restrict CUDA GPUs, e.g. "0" or "0,1" (=> CUDA_VISIBLE_DEVICES)
-    IMAGE_LOG_FILE             append [pictura-mcp] logs to this file (default: stderr)
-    IMAGE_MODEL_CACHE_DIR         model download/cache directory (default: HF cache)
+    IMAGE_MODEL_CACHE_DIR        model download/cache directory (default: HF cache)
     IMAGE_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
     IMAGE_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
     IMAGE_SKIP_PREFETCH=1         skip pre-downloading allowlisted models at startup
+    IMAGE_HOST                    bind address for http/sse (default 127.0.0.1)
+    IMAGE_PORT                    TCP port for http/sse (default 8000)
+    IMAGE_LOG_FILE                append [pictura-mcp] logs to this file (default: stderr)
 
 Client-supplied `lora` ids are restricted to a built-in default allowlist
 (override via IMAGE_LORA_ALLOWLIST); URLs/local paths are rejected and weights
@@ -30,8 +32,8 @@ for saving them — local and remote operation is identical.
 
 Transports / remote access (CLI):
     --transport stdio|http|sse   default stdio (spawned by the MCP client)
-    --host <host>                bind address for http/sse (default 127.0.0.1)
-    --port <port>                TCP port for http/sse (default 8000)
+    --host <host>                bind address for http/sse (default: $IMAGE_HOST or 127.0.0.1)
+    --port <port>                TCP port for http/sse (default: $IMAGE_PORT or 8000)
     --max-body-mb <MB>           max HTTP request body for http/sse (default 16)
                                  Img2img base64 image input is sent in the body;
                                  16 MB body ≈ 12 MB image, ample for typical
@@ -1193,8 +1195,14 @@ def main() -> int:  # noqa: C901
         default="stdio",
         help="MCP transport (default: stdio)",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="bind address for http/sse")
-    parser.add_argument("--port", type=int, default=8000, help="TCP port for http/sse")
+    parser.add_argument("--host", default=None, help="bind address for http/sse"
+                        " (default: $IMAGE_HOST or 127.0.0.1)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="TCP port for http/sse (default: $IMAGE_PORT or 8000)",
+    )
     parser.add_argument(
         "--max-body-mb",
         type=int,
@@ -1213,6 +1221,8 @@ def main() -> int:  # noqa: C901
     )
     args = parser.parse_args()
     token = args.token or os.environ.get("PICTURA_MCP_TOKEN")
+    http_port = args.port or int(os.environ.get("IMAGE_PORT", "8000"))
+    http_host = args.host or os.environ.get("IMAGE_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
     # logrotate support: reopen the configured log file on SIGHUP.
     try:
@@ -1236,8 +1246,8 @@ def main() -> int:  # noqa: C901
             return _run_http_server(
                 server,
                 args.transport,
-                args.host,
-                args.port,
+                http_host,
+                http_port,
                 token,
                 max_body_bytes=args.max_body_mb * 1024 * 1024,
             )

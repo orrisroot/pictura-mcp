@@ -158,14 +158,18 @@ There are two ways to run it as a service.
 # As root - creates the service user, prepares dirs, renders & installs the unit
 sudo deploy/install-systemd.sh /absolute/path/to/this/repo pictura-mcp 8000
 #   then edit deploy/pictura-mcp.env (token, model, IMAGE_CUDA_DEVICE,
-#   IMAGE_LOG_FILE, IMAGE_MODEL_CACHE_DIR) and: sudo systemctl restart pictura-mcp
+#   IMAGE_MODEL_CACHE_DIR, IMAGE_HOST, IMAGE_PORT, IMAGE_LOG_FILE) and:
+#   sudo systemctl restart pictura-mcp
 sudo systemctl status pictura-mcp
 ```
 
 This runs under the unprivileged `pictura-mcp` system account with hardening
-(`NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, …). The model cache and log
-paths in `deploy/pictura-mcp.env` are created/owned by that account (**log file is
-0640, owner = service account, group = service account**). Non-root operators
+(`NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, …). `ProtectSystem=strict`
+makes the FS read-only, so the installer whitelists the model cache dir and log
+file in `ReadWritePaths` (derived from `deploy/pictura-mcp.env`; log file is
+0640, owner = service account, group = service account). If you later change
+`IMAGE_MODEL_CACHE_DIR` / `IMAGE_LOG_FILE`, re-run the installer (it re-renders
+the unit and restarts the service). Non-root operators
 read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>`
 (then log out/in). If the service crashes at startup, remove
 `MemoryDenyWriteExecute=true` from the unit (torch sometimes conflicts) and

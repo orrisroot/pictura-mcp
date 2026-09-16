@@ -186,13 +186,15 @@ python server/pictura_server.py [options]
 | `IMAGE_VAE` | unset | optional VAE override |
 | `IMAGE_DEVICE` | `cuda` | `cuda` or `cpu` (auto-fallback to cpu) |
 | `IMAGE_CUDA_DEVICE` | unset | restrict CUDA GPU(s) (`0`, `0,1`) → `CUDA_VISIBLE_DEVICES` |
-| `IMAGE_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
-| `PICTURA_MCP_TOKEN` | unset | bearer token; fallback when `--token` not given |
-| `IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse |
 | `IMAGE_MODEL_CACHE_DIR` | HF cache | model download/cache directory |
 | `IMAGE_LORA_ALLOWLIST` | built-in default | override LoRA allowlist (comma-separated; `*` = any `org/repo`) |
 | `IMAGE_CONTROLNET_ALLOWLIST` | built-in default | override ControlNet allowlist (same semantics) |
 | `IMAGE_SKIP_PREFETCH` | unset | `1` = skip pre-downloading allowlisted models at startup |
+| `IMAGE_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
+| `IMAGE_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
+| `IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse |
+| `PICTURA_MCP_TOKEN` | unset | bearer token; fallback when `--token` not given |
+| `IMAGE_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
 ---
 
