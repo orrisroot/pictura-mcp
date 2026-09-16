@@ -290,4 +290,5 @@ Requires the `peft` dependency (listed in `server/requirements.txt`).
 
 - `SPEC.md` — full technical specification
 - `COMPARISON.md` — feature comparison vs other image-gen MCPs
+- `skills/` — distributable **Agent Skill** (`pictura-mcp`) for end-user agents (see `skills/README.md`)
 - `deploy/` — configuration templates + systemd unit
