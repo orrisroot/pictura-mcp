@@ -27,7 +27,10 @@ VS Code, Windsurf, local agent frameworks, …) can connect.
 
 **Key policies**
 - **Stateless**: the server never writes image files to disk in any mode.
-  Results are returned inline as base64; the client decides where to save.
+  Results are returned inline as base64 `ImageContent`; the client decides
+  where to save. Text-only clients must decode the base64 (data field) into a
+  file and open it to inspect the result (the tool descriptions and the result
+  note instruct this).
 - **Identical local & remote behavior**: no mode-dependent output handling.
 - **Concurrency**: requests are accepted concurrently (the event loop never
   blocks on GPU work). Rendering runs on a slot pool; the pool size is derived

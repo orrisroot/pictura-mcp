@@ -31,8 +31,14 @@ embedded in each tool's input schema (visible to MCP clients); `list_loras` /
 `list_control_types` return the valid values, and ControlNet model identifiers
 stay server-side.
 
-Stateless by design: images are returned inline as base64 and **never written to
-the server disk**; local and remote behavior are identical.
+Stateless by design: images are returned inline as base64 (`ImageContent`,
+PNG) and **never written to the server disk**; local and remote behavior are
+identical. The server's tool result is `[image content, text note]` — unless
+your MCP client renders image blocks for you, **the assistant does not see
+the pixels**: it must decode the returned base64 (data field) into a local
+file (e.g. save as PNG) and open it with file/view tools to verify the
+result. The tool descriptions and the result note explain this to the
+client.
 
 **Concurrent requests** are accepted: the server handles multiple MCP clients
 and parallel tool calls without ever blocking its event loop. Rendering runs

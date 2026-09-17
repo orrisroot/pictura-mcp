@@ -988,8 +988,11 @@ def _build_server():
         title="Image Generation (SDXL)",
         instructions=(
             "Generate images with a local SDXL (Stable Diffusion XL) pipeline "
-            "running on the host GPU. Tools return images inline as base64; "
-            "the server never writes files - the client saves them."
+            "running on the host GPU. Tools return images inline as base64 "
+            "ImageContent; the server never writes files - the client saves "
+            "them. If your client does not visually render image content, "
+            "decode the returned base64 (data field, image/png) into a file "
+            "with your filesystem tools and open it to inspect the result."
         ),
     )
 
@@ -998,8 +1001,11 @@ def _build_server():
         title="Generate Image",
         description=(
             "Generate an image from a text prompt using the local SDXL "
-            "model. Returns the generated image inline as base64 PNG; nothing "
-            "is written on the server - save the returned image client-side."
+            "model. Returns the generated image inline as base64 PNG "
+            "(ImageContent) - nothing is written on the server. To actually "
+            "see or verify the image, decode the returned base64 (data field "
+            "of the first content block, mimeType image/png) into a local file "
+            "and open it with your file tools."
         ),
     )
     async def generate_image(
@@ -1090,8 +1096,10 @@ def _build_server():
 
         b64, elapsed, name = _finalize_result(image, actual_seed, t0, prefix="img")
         note = (
-            f"No file written on server (stateless, same as remote); image returned "
-            f"inline - save it client-side (e.g. as {name}). seed={actual_seed}, {elapsed}s"
+            f"Success. The PNG image {name} is attached to this result as "
+            f"base64 (image content block, mimeType image/png). If you cannot "
+            f"view image content, write the base64 to a file and open it. "
+            f"seed={actual_seed}, {elapsed}s"
         )
         return [
             ImageContent(type="image", data=b64, mimeType="image/png"),
@@ -1104,8 +1112,10 @@ def _build_server():
         description=(
             "Transform an existing image using a text prompt (img2img). Pass the "
             "source as a local file path (server host), a file:// URI, or a "
-            "data:image/...;base64,... URI. Returns the edited image inline "
-            "(base64); nothing is written to the server disk."
+            "data:image/...;base64,... URI. Returns the edited image inline as "
+            "base64 PNG (ImageContent) - nothing is written to the server disk. "
+            "To see or verify it, decode the returned base64 (data field of the "
+            "first content block) into a local file and open it."
         ),
     )
     async def edit_image(
@@ -1224,8 +1234,9 @@ def _build_server():
 
         b64, elapsed, name = _finalize_result(edited, actual_seed, t0, prefix="img2img")
         note = (
-            f"No file written on server (stateless, same as remote); image returned "
-            f"inline - save it client-side (e.g. as {name}). "
+            f"Success. The edited PNG is attached to this result as base64 "
+            f"(image content block) - if you cannot view it, decode it to a file "
+            f"(e.g. {name}) and open that. "
             f"seed={actual_seed}, strength={strength}, {elapsed}s"
         )
         return [
