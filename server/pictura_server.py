@@ -882,7 +882,8 @@ def _build_server():
         title="Image Generation (Stable Diffusion)",
         instructions=(
             "Generate images with a local Stable Diffusion pipeline running on the "
-            "host GPU. The tool returns the image plus the saved file path."
+            "host GPU. Tools return images inline as base64; the server never "
+            "writes files - the client saves them."
         ),
     )
 
@@ -891,17 +892,39 @@ def _build_server():
         title="Generate Image",
         description=(
             "Generate an image from a text prompt using the local Stable Diffusion "
-            "model. Returns the generated image and the saved file path."
+            "model. Returns the generated image inline as base64 PNG; nothing is "
+            "written on the server - save the returned image client-side."
         ),
     )
     async def generate_image(
-        prompt: str,
-        negative_prompt: str = "",
-        width: int = W_DEFAULT,
-        height: int = H_DEFAULT,
-        num_inference_steps: int = STEPS_DEFAULT,
-        guidance_scale: float = 7.5,
-        seed: int = -1,
+        prompt: Annotated[
+            str,
+            Field(description="What to draw. English works best; be specific and concrete."),
+        ],
+        negative_prompt: Annotated[
+            str,
+            Field(description="Things to avoid, e.g. 'blurry, low quality'. (FLUX models ignore negative prompts.)"),
+        ] = "",
+        width: Annotated[
+            int,
+            Field(description="Image width in px; rounded to a multiple of 8 and clamped to 256..1024."),
+        ] = W_DEFAULT,
+        height: Annotated[
+            int,
+            Field(description="Image height in px; rounded to a multiple of 8 and clamped to 256..1024."),
+        ] = H_DEFAULT,
+        num_inference_steps: Annotated[
+            int,
+            Field(description="Denoising steps; clamped to 10..100 (typical 20-30 for SD1.5, 25-40 for SDXL)."),
+        ] = STEPS_DEFAULT,
+        guidance_scale: Annotated[
+            float,
+            Field(description="How closely the image follows the prompt; range 1..15 (default 7.5)."),
+        ] = 7.5,
+        seed: Annotated[
+            int,
+            Field(description="Seed for reproducibility; -1 = random. The reply note reports the actual seed used."),
+        ] = -1,
         lora: Annotated[
             str,
             Field(
@@ -979,15 +1002,47 @@ def _build_server():
         ),
     )
     async def edit_image(
-        prompt: str,
-        image: str,
-        negative_prompt: str = "",
-        strength: float = 0.6,
-        width: int = 0,
-        height: int = 0,
-        num_inference_steps: int = 25,
-        guidance_scale: float = 7.5,
-        seed: int = -1,
+        prompt: Annotated[
+            str,
+            Field(description="How to transform the image. English works best; be specific."),
+        ],
+        image: Annotated[
+            str,
+            Field(
+                description=(
+                    "Source image: local file path (on the server host), a file:// URI, "
+                    "or a data:image/...;base64,... URI."
+                ),
+            ),
+        ],
+        negative_prompt: Annotated[
+            str,
+            Field(description="Things to avoid, e.g. 'blurry, low quality'. (FLUX ignores negative prompts; img2img is unavailable on FLUX.)"),
+        ] = "",
+        strength: Annotated[
+            float,
+            Field(description="0..1: how strongly to transform (higher = more change). Default 0.6; clamped to 0.01..1.0."),
+        ] = 0.6,
+        width: Annotated[
+            int,
+            Field(description="Target width in px (rounded to a multiple of 8, clamped to 256..1024); 0 = keep the source size."),
+        ] = 0,
+        height: Annotated[
+            int,
+            Field(description="Target height in px (rounded to a multiple of 8, clamped to 256..1024); 0 = keep the source size."),
+        ] = 0,
+        num_inference_steps: Annotated[
+            int,
+            Field(description="Denoising steps; clamped to 10..100. Effective steps ≈ steps × strength."),
+        ] = 25,
+        guidance_scale: Annotated[
+            float,
+            Field(description="How closely the result follows the prompt; range 1..15 (default 7.5)."),
+        ] = 7.5,
+        seed: Annotated[
+            int,
+            Field(description="Seed for reproducibility; -1 = random. The reply note reports the actual seed used."),
+        ] = -1,
         lora: Annotated[
             str,
             Field(
@@ -1018,22 +1073,9 @@ def _build_server():
         ] = 1.0,
         ctx: Context = None,
     ) -> list:
-        """Parameters:
-        - prompt: how to transform the image (English works best).
-        - image: source image - local file path, file:// URI, or data:image...;base64, URI.
-        - negative_prompt: things to avoid.
-        - strength: 0..1 how strongly to transform (higher = more change; 0.6 default).
-        - width/height: target size in pixels (0 = keep source size, clamped to <=1024).
-        - num_inference_steps / guidance_scale / seed: same as generate_image.
-        - lora: apply LoRA adapter(s): 'huggingface/repo:weight' (default 1.0),
-          comma-separated; empty = none. Call list_loras for valid ids.
-        - control_type: ControlNet type applied to the source image (abstract; the
-          server picks and hides the model). Currently supported: "
-        + (", ".join(c for c, i in _CONTROL_TYPES.items() if i.get("supported")))
-        + ". Call list_control_types for the live list (it can change). Empty disables.
-        - control_scale: ControlNet conditioning strength (~0.4-1.0).
-        Note: the server never writes files; the image is returned inline and the
-        client saves it where it wants (identical in local and remote modes).
+        """img2img edit; returns the image inline (base64 PNG). The server never
+        writes files - the client saves the returned image where it wants
+        (identical in local and remote modes).
         """
         steps = max(10, min(100, num_inference_steps))
         strength = max(0.01, min(1.0, strength))
@@ -1089,7 +1131,10 @@ def _build_server():
         description="Report the loaded image model, device, dtype and VRAM usage.",
     )
     async def server_status() -> str:
-        info = _pipe_info or _load_pipeline()[1]
+        import asyncio
+
+        # Load off the event loop: the first call may load the model (minutes).
+        info = _pipe_info or (await asyncio.to_thread(_load_pipeline))[1]
         return (
             f"model={info.get('model')}\n"
             f"device={info.get('device')}\n"
