@@ -115,11 +115,20 @@ Every MCP client stores server definitions in the same shape
     "generate-image": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
-      "env": { "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" }
+      "env": { "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" },
+      "requestTimeoutMs": 600000
     }
   }
 }
 ```
+
+`requestTimeoutMs` (client-side, supported by pi's MCP adapter and most
+harnesses) must allow for GPU rendering time: SDXL at the default 1024²·30
+steps takes tens of seconds, and under parallel load a job may additionally
+wait for a free slot or a lazily built one — a cold burst of parallel calls
+can run minutes. The MCP SDK default (60 s) therefore times out on ordinary
+generations; the shipped templates use `600000` (10 min — only a first-run
+cold cache download could exceed that).
 
 Where that block goes depends on the client:
 
@@ -170,7 +179,9 @@ Remote client config (`deploy/mcp.remote.json.example`):
   "mcpServers": {
     "generate-image": {
       "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
-      "headers": { "Authorization": "Bearer <TOKEN>" }
+      "headers": { "Authorization": "Bearer <TOKEN>" },
+      "requestTimeoutMs": 600000,
+      "toolPrefix": ""
     }
   }
 }

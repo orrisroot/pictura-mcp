@@ -5,6 +5,7 @@
       "headers": {
         "Authorization": "Bearer <TOKEN>"
       },
+      "requestTimeoutMs": 600000,
       "toolPrefix": ""
     }
   }

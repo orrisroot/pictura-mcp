@@ -5,7 +5,8 @@
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": {
         "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0"
-      }
+      },
+      "requestTimeoutMs": 600000
     }
   }
 }

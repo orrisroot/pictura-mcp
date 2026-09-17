@@ -234,11 +234,19 @@ bound to any client. Every client stores server definitions in the same shape:
   "mcpServers": {
     "generate-image": {
       "url": "http://<HOST>:8000/mcp",
-      "headers": { "Authorization": "Bearer <TOKEN>" }
+      "headers": { "Authorization": "Bearer <TOKEN>" },
+      "requestTimeoutMs": 600000
     }
   }
 }
 ```
+
+**Client timeout** (`requestTimeoutMs`, supported by pi's MCP adapter and most
+harnesses): set it generously — SDXL at default 1024²·30 steps takes tens of
+seconds, and under parallel load a job may additionally wait for a free slot
+or a lazily built one (a cold parallel burst can run minutes). The MCP SDK
+default (60 s) times out on ordinary generations; the shipped templates use
+`600000` (10 min — only a first-run cold cache download could exceed that).
 
 Any other harness simply points its own client config at the same server — the
 block above is identical regardless of harness.
