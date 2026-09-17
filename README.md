@@ -34,6 +34,18 @@ stay server-side.
 Stateless by design: images are returned inline as base64 and **never written to
 the server disk**; local and remote behavior are identical.
 
+**Concurrent requests** are accepted: the server handles multiple MCP clients
+and parallel tool calls without ever blocking its event loop. Rendering runs
+on a pool of **slots** — each slot is an independent pipeline instance (own
+LoRA/adapter state, scheduler and offload hooks), so jobs never corrupt each
+other. The pool size is sized automatically from measured free VRAM once the
+model is loaded (per extra slot costs a full set of weights plus one job's
+activation footprint, with a safety margin) — e.g. 3 slots on a 32 GB V100
+with SDXL fp16, and 1 (strictly serial) on smaller cards. Override it with
+`IMAGE_MAX_CONCURRENT` (an integer pins the pool; `auto` = VRAM-based). Note
+that extra slots are built lazily: the first burst of parallel jobs may pay
+one model-load per extra slot.
+
 ## Setup
 
 ```bash
@@ -233,58 +245,17 @@ Log rotation: `deploy/logrotate.example` (copytruncate, or SIGHUP postrotate).
 > `server_status`; missing/wrong tokens get 401; clients connect over stdio and
 > over HTTP.
 
-## Switching models (env `IMAGE_MODEL`)
+## Model (env `IMAGE_MODEL`)
 
-| Model | Speed | Quality | Notes |
-|---|---|---|---|
-| `stabilityai/stable-diffusion-xl-base-1.0` (default) | ~30s @1024, 30 steps | **High** | fp16-safe VAE + CPU offload on lower VRAM |
-| `stable-diffusion-v1-5/stable-diffusion-v1-5` | Fast (~3s @512, 25 steps) | Standard | lightweight |
-| `stabilityai/sd-turbo` | Very fast (4 steps) | Good | use `num_inference_steps=4, guidance_scale=1` |
-| `black-forest-labs/FLUX.1-schnell` | Slow | High | extra FLUX setup; img2img unsupported |
+SDXL family only:`stabilityai/stable-diffusion-xl-base-1.0` (default) or any
+other SDXL checkpoint (finetunes and derivatives included - just swap the
+`IMAGE_MODEL` id; the id must contain `xl`). The server refuses to start
+(`exit 2`) when `IMAGE_MODEL` is not an SDXL-family checkpoint.
 
 Set `IMAGE_MODEL` in your client's server `env` (or the systemd env file), then
-restart/reconnect the client. Defaults are model-aware: **1024×1024 / 30 steps**
-for SDXL. On lower-VRAM cards the SDXL weights auto-fall back to CPU offload; CUDA-OOM at
+restart/reconnect the client. Defaults: **1024×1024 / 30 steps**. On
+lower-VRAM cards the SDXL weights auto-fall back to CPU offload; CUDA-OOM at
 runtime also auto-offloads and retries.
-
-### Supported model families
-
-| Family | txt2img | img2img | LoRA | ControlNet | Notes |
-|---|---|---|---|---|---|
-| **SDXL** (`*xl*`) | ✅ | ✅ | ✅ | ✅ | **first-class**; default; abstract `control_type` (`canny`/`depth`/`openpose`) |
-| **SD 1.5** (`stable-diffusion-v1-5/*`) | ✅ | ✅ | ✅ (allowlist override) | ❌ (SDXL-only) | 512×512 default; lightweight |
-| **FLUX** (`*flux*`) | ✅ | ❌ | ⚠️ (extra setup) | ❌ | needs extra FLUX setup |
-
-### SD 1.5 usage example
-
-ControlNet is SDXL-only, so switch to an SD1.5 checkpoint for fast/lightweight
-*text-to-image* (and img2img). Because the **built-in LoRA allowlist is SDXL**, set
-`IMAGE_LORA_ALLOWLIST=*` (any id) or your own SD1.5 LoRA ids. Example client `env`:
-
-```jsonc
-{
-  "mcpServers": {
-    "generate-image": {
-      "command": "<PROJECT_ROOT>/.venv/bin/python",
-      "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
-      "env": {
-        "IMAGE_MODEL": "stable-diffusion-v1-5/stable-diffusion-v1-5",
-        "IMAGE_LORA_ALLOWLIST": "*"          // or e.g. "some/org/sd15-style-lora"
-      }
-    }
-  }
-}
-```
-
-```bash
-# one-off run for SD1.5
-IMAGE_MODEL=stable-diffusion-v1-5/stable-diffusion-v1-5 \
-IMAGE_LORA_ALLOWLIST='*' \
-./.venv/bin/python server/pictura_server.py --transport http --token <TOKEN>
-```
-
-- Defaults become **512×512 / 30 steps**, generation ≈ 3 s @512/25.
-- Calling `control_type` on a non-SDXL model returns a clear error (no bad loads).
 
 ## Image editing (img2img)
 

@@ -29,6 +29,12 @@ VS Code, Windsurf, local agent frameworks, …) can connect.
 - **Stateless**: the server never writes image files to disk in any mode.
   Results are returned inline as base64; the client decides where to save.
 - **Identical local & remote behavior**: no mode-dependent output handling.
+- **Concurrency**: requests are accepted concurrently (the event loop never
+  blocks on GPU work). Rendering runs on a slot pool; the pool size is derived
+  from measured free VRAM (per extra slot: another full weight set + activation
+  footprint + fixed reserve; capped; `IMAGE_MAX_CONCURRENT` overrides). Each
+  slot is an independent pipeline instance so LoRA/offload/scheduler state
+  never races between concurrent jobs.
 - **Tools never accept a path**: the save location is not controllable through
   the MCP interface.
 
@@ -96,8 +102,7 @@ no file was written on the server. On failure a text error is returned.
 ### Model-aware defaults
 | Model | Default W×H | Default steps |
 |---|---|---|
-| SDXL (`xl` in id) | 1024×1024 | 30 |
-| any other (SD1.5, sd-turbo, FLUX…) | 512×512 | 30 |
+| SDXL (required) | 1024×1024 | 30 |
 
 ### Memory strategy (low VRAM)
 1. fp16 weights loaded; attention slicing + VAE slicing + VAE tiling enabled.
@@ -107,35 +112,23 @@ no file was written on the server. On failure a text error is returned.
 4. img2img reuses the loaded components via `AutoPipelineForImage2Image.from_pipe`
    (shared weights, no second model copy).
 
-### Switching models
-Set `IMAGE_MODEL`. Reasonable choices on this hardware:
+### Model family (SDXL only)
 
-| Model | Notes |
-|---|---|
-| `stabilityai/stable-diffusion-xl-base-1.0` (default) | Best balance of quality/speed |
-| `stable-diffusion-v1-5/stable-diffusion-v1-5` | Lightweight |
-| `stabilityai/sd-turbo` | Use `num_inference_steps=4, guidance_scale=1` |
-| `black-forest-labs/FLUX.1-schnell` | Needs extra setup; img2img unsupported |
+This server supports the **SDXL family only**. `IMAGE_MODEL` must reference an
+SDXL checkpoint (default `stabilityai/stable-diffusion-xl-base-1.0`; the id
+must contain `xl`); finetunes and SDXL-derivative checkpoints work by simply
+swapping the model id. Non-SDXL values are rejected at startup (exit 2).
 
-**Supported families:**
-
-| Family | txt2img | img2img | LoRA | ControlNet |
-|---|---|---|---|---|
-| SDXL (`*xl*`) | ✅ | ✅ | ✅ | ✅ (first-class; abstract `control_type`) |
-| SD 1.5 (`stable-diffusion-v1-5/*`) | ✅ | ✅ | ✅ (allowlist override) | ❌ (SDXL-only guard) |
-| FLUX (`*flux*`) | ✅ | ❌ | ⚠️ | ❌ |
-
-**SD 1.5 usage example** (fast/lightweight txt2img & img2img): set
-`IMAGE_MODEL=stable-diffusion-v1-5/stable-diffusion-v1-5` (+ `IMAGE_LORA_ALLOWLIST=*`
-or SD1.5 LoRA ids; the built-in LoRA allowlist is SDXL). Defaults become
-512×512 / 30 steps, ≈3 s @512/25. `control_type` on a non-SDXL model is rejected
-with a clear error.
+When swapping in an SDXL finetune, review the LoRA / ControlNet allowlists:
+LoRA ids are default-allowlisted for the base checkpoints, so other adapters
+require `IMAGE_LORA_ALLOWLIST` (or `*`), and the ControlNet models must be
+SDXL-compatible (the internal allowlist handles that).
 
 ### LoRA / ControlNet allowlist & downloads
 - **Default allowlist** of generic SDXL LoRAs (`nerijs/pixel-art-xl`,
   `CiroN2022/toy-face`) via `IMAGE_LORA_ALLOWLIST`. ControlNet is exposed as
   abstract `control_type`s (`canny` / `depth` / `openpose`, in-memory
-  preprocessed server-side, **SDXL-only**); the backing model is resolved from an
+  preprocessed server-side); the backing model is resolved from an
   internal `IMAGE_CONTROLNET_ALLOWLIST` and is **not exposed to clients**.
 - URLs and local paths are always rejected; weights load safetensors-only.
 - Allowlisted models are **pre-downloaded at service startup** (skip with

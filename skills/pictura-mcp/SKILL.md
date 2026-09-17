@@ -87,12 +87,12 @@ and steers the edit; it is **SDXL-only**.
 - LoRA ids look like `org/repo` and take an optional weight (`:0.8`); verify
   with `list_loras`.
 
-## Model-family constraints
+## Model family (SDXL only)
 
-- **SDXL** is first-class: txt2img, img2img, LoRA, ControlNet all supported.
-- **SD 1.5** (`IMAGE_MODEL=stable-diffusion-v1-5/*`): txt2img + img2img + LoRA
-  (with allowlist override); `control_type` returns a clear error (SDXL-only).
-- **FLUX** (`*flux*`): txt2img only.
+- The server supports the **SDXL family only** (`IMAGE_MODEL` must be an SDXL
+  checkpoint; the default is
+  `stabilityai/stable-diffusion-xl-base-1.0`). txt2img, img2img, LoRA and
+  ControlNet are all supported. Non-SDXL models are rejected at startup.
 
 ## Notes
 

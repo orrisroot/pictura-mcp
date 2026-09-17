@@ -1,13 +1,15 @@
 """
 Image generation MCP server (MCP 2.x).
 
-Runs a Stable Diffusion pipeline (Hugging Face `diffusers`) and exposes it as
-MCP tools over stdio. Uses the local GPU (CUDA) when available.
+Runs an SDXL (Stable Diffusion XL) pipeline (Hugging Face `diffusers`) and
+exposes it as MCP tools over stdio. Uses the local GPU (CUDA) when available.
+SDXL is the supported model family: any SDXL checkpoint (including base or
+finetune variants) can be selected via `IMAGE_MODEL`.
 
 Configuration (environment variables):
-    IMAGE_MODEL       Hugging Face model id (default: stabilityai/stable-diffusion-xl-base-1.0)
-                      Other options: stable-diffusion-v1-5/stable-diffusion-v1-5 (SD1.5),
-                                     stabilityai/sd-turbo, black-forest-labs/FLUX.1-schnell
+    IMAGE_MODEL       Hugging Face model id, SDXL family
+                      (default: stabilityai/stable-diffusion-xl-base-1.0;
+                      any SDXL checkpoint/finetune id works)
     IMAGE_VAE         Optional VAE model id to attach (e.g. for SDXL fp16 fixes)
     IMAGE_DEVICE      cuda | cpu (default: cuda if available else cpu)
     IMAGE_CUDA_DEVICE          restrict CUDA GPUs, e.g. "0" or "0,1" (=> CUDA_VISIBLE_DEVICES)
@@ -15,6 +17,10 @@ Configuration (environment variables):
     IMAGE_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
     IMAGE_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
     IMAGE_SKIP_PREFETCH=1         skip pre-downloading allowlisted models at startup
+    IMAGE_MAX_CONCURRENT          concurrent rendering slots (default "auto": sized
+                                  from measured free VRAM; integer pins the pool;
+                                  1 = strictly serial). Each slot is an independent
+                                  pipeline instance (own LoRA/sched/offload state).
     IMAGE_HOST                    bind address for http/sse (default 127.0.0.1)
     IMAGE_PORT                    TCP port for http/sse (default 8000)
     IMAGE_LOG_FILE                append [pictura-mcp] logs to this file (default: stderr)
@@ -57,7 +63,9 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -187,30 +195,131 @@ _CONTROL_TYPES: dict[str, dict] = {
 }
 
 # Model-aware default resolution / steps.
-IS_XL = "xl" in MODEL_ID.lower()
+IS_XL = "xl" in MODEL_ID.lower()  # the server requires an SDXL model (checked in main)
+
+# Default resolution / steps (SDXL).
 STEPS_DEFAULT = 30
-W_DEFAULT, H_DEFAULT = (1024, 1024) if IS_XL else (512, 512)
+W_DEFAULT, H_DEFAULT = 1024, 1024
 
-_pipe = None
-_pipe_info: dict = {}
+# --------------------------------------------------------------------------
+# Slot pool: concurrent rendering on one GPU
+# --------------------------------------------------------------------------
+
+# Incoming MCP requests are always handled concurrently (the event loop never
+# blocks on GPU work). Rendering itself uses a pool of "slots": each slot owns
+# INDEPENDENT pipeline instances (txt2img / img2img / ControlNet) so LoRA
+# adapters, scheduler state and CPU-offload hooks never collide between
+# concurrent jobs (weights are therefore duplicated per slot).
+#
+# The pool size is derived from measured free VRAM once the first model is
+# loaded: per extra slot the cost is a full weight set plus the activation
+# footprint of one job at the default resolution, and a fixed margin stays
+# free for decode spikes / other tenants. On a 32 GB V100 with SDXL fp16
+# (~7 GB weights) this yields 3 concurrent slots; on smaller cards it simply
+# degrades to 1 (= strictly serial, previous behavior).
+
+_SLOT_RESERVE_GB = 2.0        # VRAM margin that is never handed to extra slots
+_SLOT_ACT_BASE_GB = 1.5       # per-job activation floor (fp16)
+_SLOT_ACT_PER_MPX_GB = 1.2    # + per megapixel of the default resolution
+_SLOT_CAP = 3                 # safety cap in "auto" mode
+
+_slots: list = []             # slots in the pool (slot 0 first, built lazily)
+_BUILD_LOCK = threading.Lock()  # serialize pipeline construction (RAM / disk cache)
+_rr_next = 0                  # rotating acquisition start index
+
+
+class _Slot:
+    """One rendering slot; its lock is held for the duration of a job."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.txt = None       # txt2img pipeline instance
+        self.i2i = None       # img2img pipeline instance (built from slot.txt)
+        self.cn = {}          # controlnet model id -> pipeline instance
+        self.info = {}        # load info of the txt pipeline (for reporting)
+
+
+def _compute_slots(info: dict) -> int:
+    """Decide the pool size from measured free VRAM (or honor
+    IMAGE_MAX_CONCURRENT: an integer pins the pool size)."""
+    raw = (os.environ.get("IMAGE_MAX_CONCURRENT") or "auto").strip().lower()
+    if raw and raw != "auto":
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            _log(f"IMAGE_MAX_CONCURRENT={raw!r} ignored (not an int); using auto")
+    if info.get("device") != "cuda" or info.get("vram_gb", 0) <= 0:
+        return 1  # CPU: parallel instances only double RAM without real speedup
+    try:
+        import torch
+
+        free_gb = torch.cuda.mem_get_info()[0] / 1e9
+    except Exception:  # noqa: BLE001
+        return 1
+    pixels = (W_DEFAULT * H_DEFAULT) / 1e6
+    act = _SLOT_ACT_BASE_GB + _SLOT_ACT_PER_MPX_GB * pixels
+    if "float16" not in str(info.get("dtype")):
+        act *= 2  # fp32 activations roughly double
+    cost = max(0.1, info.get("weights_gb", 0) + act)  # extra slot: full weights
+    extra = int((free_gb - _SLOT_RESERVE_GB) // cost)
+    n = max(1, min(_SLOT_CAP, 1 + extra))
+    _log(
+        f"slot sizing: free {free_gb:.1f} GB, per-slot ~{cost:.1f} GB "
+        f"(weights {info.get('weights_gb', 0):.1f} + act {act:.1f}, "
+        f"reserve {_SLOT_RESERVE_GB:.1f}) -> {n} slots"
+    )
+    return n
+
+
+@contextmanager
+def _slot_ctx():
+    """Acquire a rendering slot: rotating first-fit, non-blocking; if every
+    slot is busy, queue (block) on the next slot in rotation."""
+    global _rr_next
+    if not _slots:
+        # bootstrap slot 0 synchronously so the pool size is final
+        with _BUILD_LOCK:
+            if not _slots:
+                s0 = _Slot()
+                _slots.append(s0)
+                _build_txt(s0)  # appends pool placeholders sized from VRAM
+    n = len(_slots)
+    for i in range(n):
+        cand = _slots[(_rr_next + i) % n]
+        if cand.lock.acquire(blocking=False):
+            _rr_next += i + 1
+            break
+    else:
+        cand = _slots[_rr_next % n]
+        _rr_next += 1
+        cand.lock.acquire()  # all busy -> wait in queue
+    try:
+        yield cand
+    finally:
+        cand.lock.release()
+
+
+def _run_on_slot(fn, *args, **kwargs):
+    """Run a rendering job on an acquired slot: fn(slot, *args, **kwargs)."""
+    with _slot_ctx() as slot:
+        return fn(slot, *args, **kwargs)
 
 
 # --------------------------------------------------------------------------
-# Pipeline loading (lazy, once)
+# Slot pipeline building (lazy per slot)
 # --------------------------------------------------------------------------
 
-def _load_pipeline():
-    """Load (or reuse) the diffusion pipeline with memory optimizations for
-    a single consumer GPU (works on small-VRAM cards too)."""
-    global _pipe, _pipe_info
-    if _pipe is not None:
-        return _pipe, _pipe_info
+def _build_txt(slot):
+    """Build the slot's own txt2img diffusion pipeline with memory
+    optimizations for a single consumer GPU (works on small-VRAM cards too).
+    The caller holds the slot lock; construction is serialized by callers
+    using _BUILD_LOCK."""
+    if slot.txt is not None:
+        return slot.txt
 
     import torch
     from diffusers import (
         AutoencoderKL,
-        DiffusionPipeline,
-        StableDiffusionPipeline,
         StableDiffusionXLPipeline,
     )
 
@@ -221,108 +330,100 @@ def _load_pipeline():
     dtype = torch.float16 if device == "cuda" else torch.float32
     model_kwargs: dict = {"dtype": dtype}
 
-    # Some models must be loaded with a specific pipeline class / extra bits.
-    model_lower = MODEL_ID.lower()
-    loader = None
-    if "xl" in model_lower:
-        loader = StableDiffusionXLPipeline
-    elif "flux" in model_lower:
-        from diffusers import FluxPipeline
+    if not IS_XL:
+        raise ValueError(
+            f"IMAGE_MODEL={MODEL_ID!r} is not an SDXL model: this server "
+            "supports the SDXL family only"
+        )
 
-        loader = FluxPipeline
-        model_kwargs["dtype"] = dtype
-    else:
-        loader = StableDiffusionPipeline
-
-    _log(f"Loading model {MODEL_ID} ... (this may take a while on first run)")
+    _log(f"Loading model {MODEL_ID} (slot {_slots.index(slot)}) ...")
     t0 = time.time()
 
     try:
-        if "xl" in model_lower:
-            if VAE_ID:
-                from diffusers import AutoencoderKL
+        if VAE_ID:
+            from diffusers import AutoencoderKL
 
-                vae = AutoencoderKL.from_pretrained(VAE_ID, dtype=dtype)
-                _pipe = loader.from_pretrained(MODEL_ID, vae=vae, **model_kwargs)
-            else:
-                _pipe = loader.from_pretrained(MODEL_ID, **model_kwargs)
+            vae = AutoencoderKL.from_pretrained(VAE_ID, dtype=dtype)
+            pipe = StableDiffusionXLPipeline.from_pretrained(MODEL_ID, vae=vae, **model_kwargs)
         else:
-            _pipe = loader.from_pretrained(MODEL_ID, **model_kwargs)
+            pipe = StableDiffusionXLPipeline.from_pretrained(MODEL_ID, **model_kwargs)
     except Exception:
         # Retry with lower precision headroom (some repos are fp32-safetensors only).
         _log("Initial load failed, retrying with default precision...")
         model_kwargs.pop("dtype", None)
         model_kwargs.pop("vae", None)
-        _pipe = loader.from_pretrained(MODEL_ID, **model_kwargs)
+        pipe = StableDiffusionXLPipeline.from_pretrained(MODEL_ID, **model_kwargs)
+    slot.txt = pipe
 
     # ---- memory optimizations for low-VRAM cards -----------------------------
-    if "flux" not in model_lower:
-        try:
-            _pipe.enable_attention_slicing()
-        except Exception as e:  # noqa: BLE001
-            _log(f"attention slicing skipped: {e}")
-        try:
-            _pipe.enable_vae_slicing()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            _pipe.enable_vae_tiling()
-        except Exception:  # noqa: BLE001
-            pass
+    try:
+        pipe.enable_attention_slicing()
+    except Exception as e:  # noqa: BLE001
+        _log(f"attention slicing skipped: {e}")
+    try:
+        pipe.enable_vae_slicing()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        pipe.enable_vae_tiling()
+    except Exception:  # noqa: BLE001
+        pass
 
     # ---- fp16 VAE NaN / black-image guard for SDXL ---------------------------
     # Done BEFORE device placement so the swapped VAE is included by the
     # offload hooks or the .to(device) move below.
-    if "xl" in model_lower and dtype == torch.float16:
+    if dtype == torch.float16:
         if not VAE_ID:
             # Use the fp16-safe VAE (works in fp16 directly, no fp32 upcast or
             # vae-tiling precision conflicts).
             from diffusers import AutoencoderKL
 
             _log("SDXL: using fp16-safe VAE madebyollin/sdxl-vae-fp16-fix")
-            _pipe.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", dtype=dtype)
+            pipe.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", dtype=dtype)
         else:
             # User-explicit VAE: keep decode in fp32 to avoid NaN/black output.
             try:
-                _pipe.upcast_vae()
+                pipe.upcast_vae()
                 _log("SDXL: upcast_vae() enabled to avoid fp16 black-image artifacts")
             except Exception as e:  # noqa: BLE001
                 _log(f"SDXL upcast_vae skipped: {e}")
 
+    is_first = _slots and slot is _slots[0]
     offloaded = False
     weights_gb = 0.0
     vram_gb = 0.0
     if device == "cuda":
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-        weights_gb = _estimate_weights_bytes(_pipe) / 1e9
+        weights_gb = _estimate_weights_bytes(pipe) / 1e9
         # SDXL in fp16 OOMs around ~768px+ with weights resident on low-VRAM
-        # cards, so spill
-        # to CPU up front when the default resolution needs the headroom.
-        proactive_offload = IS_XL and (W_DEFAULT >= 768 or H_DEFAULT >= 768)
+        # cards, so spill to CPU up front when the default resolution needs
+        # the headroom. Only slot 0 does this: extra slots exist precisely
+        # because weights fit, and offloading would stall concurrent jobs.
+        proactive_offload = is_first and (W_DEFAULT >= 768 or H_DEFAULT >= 768)
         if proactive_offload or weights_gb > 0.8 * vram_gb:
             _log(
                 f"(proactive_offload={proactive_offload}, weights {weights_gb:.1f}/"
                 f"{vram_gb:.1f} GB) -> enabling model CPU offload"
             )
             try:
-                _pipe.enable_model_cpu_offload()
+                pipe.enable_model_cpu_offload()
                 offloaded = True
             except Exception as e:  # noqa: BLE001
                 _log(f"model cpu offload skipped: {e} -> .to({device})")
-                _pipe.to(device)
+                pipe.to(device)
         else:
             _log(f"weights {weights_gb:.1f} GB fit in VRAM {vram_gb:.1f} GB -> keeping on GPU")
-            _pipe.to(device)
+            pipe.to(device)
     else:
-        _pipe.to(device)
+        pipe.to(device)
 
-    _pipe.safety_checker = None
+    pipe.safety_checker = None
     try:
-        _pipe._safety_checker = None  # type: ignore[assignment]
+        pipe._safety_checker = None  # type: ignore[assignment]
     except Exception:  # noqa: BLE001
         pass
 
-    _pipe_info = {
+    slot.info = {
         "model": MODEL_ID,
         "device": device,
         "dtype": str(dtype),
@@ -331,8 +432,23 @@ def _load_pipeline():
         "vram_gb": round(vram_gb, 1),
         "load_seconds": round(time.time() - t0, 1),
     }
-    _log(f"Model ready ({_pipe_info})")
-    return _pipe, _pipe_info
+    # Size the pool once slot 0's weights are known (measured free VRAM).
+    if is_first:
+        n_slots = _compute_slots(slot.info)
+        while len(_slots) < n_slots:
+            _slots.append(_Slot())
+        _log(f"pipeline pool sized: {len(_slots)} slots")
+    _log(f"Model ready (slot {_slots.index(slot)}, {slot.info})")
+    return pipe
+
+
+def _ensure_txt(slot):
+    """Return the slot's txt2img pipeline, building it once on first use."""
+    if slot.txt is None:
+        with _BUILD_LOCK:
+            if slot.txt is None:
+                _build_txt(slot)
+    return slot.txt
 
 
 def _estimate_weights_bytes(pipe) -> int:
@@ -350,6 +466,7 @@ def _estimate_weights_bytes(pipe) -> int:
 
 
 def _generate(
+    slot,
     prompt: str,
     negative_prompt: str,
     width: int,
@@ -362,7 +479,7 @@ def _generate(
 ):
     import torch
 
-    pipe, _ = _load_pipeline()
+    pipe = _ensure_txt(slot)
     _apply_loras(pipe, lora_spec)
 
     if seed < 0:
@@ -371,35 +488,25 @@ def _generate(
 
     common = dict(
         prompt=prompt,
+        negative_prompt=negative_prompt,
         width=width,
         height=height,
         num_inference_steps=steps,
         guidance_scale=guidance,
         generator=generator,
     )
-    if pipe.__class__.__name__ in ("FluxPipeline", "FluxPriorityPipeline"):
-        # FLUX does not use a negative prompt.
-        pass
-    else:
-        common["negative_prompt"] = negative_prompt
 
-    is_flux = pipe.__class__.__name__ in ("FluxPipeline", "FluxPriorityPipeline")
-    if is_flux:
-        # FLUX does not use a negative prompt and has no per-step callback.
-        images = pipe(**common).images
-    else:
+    def _cb(_pipe, step: int, _ts, _kwargs):
+        if on_step:
+            on_step(step)
+        return _kwargs
 
-        def _cb(_pipe, step: int, _ts, _kwargs):
-            if on_step:
-                on_step(step)
-            return _kwargs
-
-        images = _oom_retry(
-            pipe,
-            **common,
-            callback_on_step_end=_cb,
-            callback_on_step_end_tensor_inputs=[],
-        ).images
+    images = _oom_retry(
+        pipe,
+        **common,
+        callback_on_step_end=_cb,
+        callback_on_step_end_tensor_inputs=[],
+    ).images
     return images[0], seed
 
 
@@ -407,35 +514,39 @@ def _generate(
 # img2img
 # --------------------------------------------------------------------------
 
-_i2i_pipe = None
-
-
-def _load_i2i_pipeline():
-    """Build an img2img pipeline that reuses the loaded txt2img components
-    (shared weights -> no extra VRAM for the base model)."""
-    global _i2i_pipe
-    if _i2i_pipe is not None:
-        return _i2i_pipe
+def _build_i2i(slot):
+    """Build the slot's img2img pipeline from its own txt2img pipeline
+    (shares this slot's weights -> no extra VRAM for the base model)."""
     from diffusers import AutoPipelineForImage2Image
 
-    pipe, info = _load_pipeline()
-    if pipe.__class__.__name__ in ("FluxPipeline", "FluxPriorityPipeline"):
-        raise RuntimeError("img2img is not supported for FLUX in this build")
-    _i2i_pipe = AutoPipelineForImage2Image.from_pipe(pipe)
-    # With model CPU offload the hooks handle placement; otherwise move to GPU.
+    slot.i2i = AutoPipelineForImage2Image.from_pipe(slot.txt)
+    # Weights stay resident on this slot (extra slots imply no offload), so
+    # pin them to the GPU like the txt pipeline; with slot-0 offload the
+    # hooks handle placement instead.
+    info = slot.info
     if not info.get("offload"):
-        _i2i_pipe.to(info.get("device") or DEVICE)
+        slot.i2i.to(info.get("device") or DEVICE)
     try:
-        _i2i_pipe.enable_attention_slicing()
-    except Exception:
+        slot.i2i.enable_attention_slicing()
+    except Exception:  # noqa: BLE001
         pass
     try:
-        _i2i_pipe.enable_vae_slicing()
-        _i2i_pipe.enable_vae_tiling()
-    except Exception:
+        slot.i2i.enable_vae_slicing()
+        slot.i2i.enable_vae_tiling()
+    except Exception:  # noqa: BLE001
         pass
-    _log("img2img pipeline ready (shared weights)")
-    return _i2i_pipe
+    _log("img2img pipeline ready (slot-local, shared weights)")
+    return slot.i2i
+
+
+def _ensure_i2i(slot):
+    """Return the slot's img2img pipeline, building it once on first use."""
+    if slot.i2i is None:
+        _ensure_txt(slot)
+        with _BUILD_LOCK:
+            if slot.i2i is None:
+                _build_i2i(slot)
+    return slot.i2i
 
 
 def _load_source_image(image_src: str):
@@ -613,11 +724,6 @@ def _resolve_control(ctype: str) -> dict:
     ctype = (ctype or "").strip().lower()
     if not ctype:
         raise ValueError("control_type is empty")
-    if not IS_XL:
-        raise ValueError(
-            "ControlNet (control_type) is only supported with the SDXL model family "
-            "(IMAGE_MODEL must contain 'xl'); remove control_type or switch to an SDXL model"
-        )
     info = _CONTROL_TYPES.get(ctype)
     if info is None:
         raise ValueError(f"unknown control_type '{ctype}'; available: {list(_CONTROL_TYPES)}")
@@ -744,60 +850,60 @@ def _preprocess_openpose(image):
     return PILImage.fromarray(canvas).convert("RGB")
 
 
-_cn_model = None
-_cn_pipe = None
-_cn_info: dict = {}
-
-
-def _load_controlnet_pipeline(model_id: str):
-    """Build a controlnet img2img pipeline (independent, lazily loaded)."""
-    global _cn_model, _cn_pipe, _cn_info
+def _build_cn(slot, model_id: str):
+    """Build the slot's own ControlNet img2img pipeline (independent of the
+    slot's txt/i2i pipelines; lazily loaded per slot and per model id)."""
     import torch
-    from diffusers import ControlNetModel
-
-    if _cn_pipe is not None and _cn_info.get("model") == model_id:
-        return _cn_pipe
+    from diffusers import (AutoencoderKL, ControlNetModel,
+                           StableDiffusionXLControlNetImg2ImgPipeline as cn_cls)
 
     device = DEVICE if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
     _check_model_id("ControlNet", model_id, "IMAGE_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST)
-    _log(f"Loading ControlNet model {model_id} ...")
-    _cn_model = ControlNetModel.from_pretrained(
+    _log(f"Loading ControlNet model {model_id} (slot {_slots.index(slot)}) ...")
+    cn_model = ControlNetModel.from_pretrained(
         model_id, dtype=dtype, use_safetensors=True, cache_dir=CACHE_DIR
     )
 
-    if "xl" in MODEL_ID.lower():
-        from diffusers import AutoencoderKL, StableDiffusionXLControlNetImg2ImgPipeline as cn_cls
+    # SDXL ControlNet img2img with the fp16-safe VAE.
+    vae_kwargs = {
+        "vae": AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", dtype=dtype)
+    }
 
-        vae_kwargs = {
-            "vae": AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", dtype=dtype)
-        }
-    else:
-        from diffusers import StableDiffusionControlNetImg2ImgPipeline as cn_cls
-
-        vae_kwargs = {}
-
-    _cn_pipe = cn_cls.from_pretrained(MODEL_ID, controlnet=_cn_model, dtype=dtype, **vae_kwargs)
+    pipe = cn_cls.from_pretrained(MODEL_ID, controlnet=cn_model, dtype=dtype, **vae_kwargs)
     for fn in ("enable_attention_slicing", "enable_vae_slicing", "enable_vae_tiling"):
         try:
-            getattr(_cn_pipe, fn)()
+            getattr(pipe, fn)()
         except Exception:  # noqa: BLE001
             pass
 
-    weights_gb = _estimate_weights_bytes(_cn_pipe) / 1e9
+    weights_gb = _estimate_weights_bytes(pipe) / 1e9
     vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-    proactive = IS_XL and (W_DEFAULT >= 768 or H_DEFAULT >= 768)
+    # Slot 0 keeps the old low-VRAM offload heuristic; extra slots exist only
+    # when VRAM allows resident weights, but the CN pipe is heavier - fall
+    # back to offload if it does not fit.
+    proactive = (_slots and slot is _slots[0]) and (W_DEFAULT >= 768 or H_DEFAULT >= 768)
     if device == "cuda" and (proactive or weights_gb > 0.8 * vram_gb):
-        _cn_pipe.enable_model_cpu_offload()
+        pipe.enable_model_cpu_offload()
     else:
-        _cn_pipe.to(device)
-    _cn_info = {"model": model_id}
-    _log(f"ControlNet img2img pipeline ready ({weights_gb:.1f} GB weights)")
-    return _cn_pipe
+        pipe.to(device)
+    slot.cn[model_id] = pipe
+    _log(f"ControlNet img2img pipeline ready (slot-local, {weights_gb:.1f} GB weights)")
+    return pipe
+
+
+def _ensure_cn(slot, model_id: str):
+    """Return the slot's ControlNet pipeline for model_id, building it once."""
+    if model_id not in slot.cn:
+        with _BUILD_LOCK:
+            if model_id not in slot.cn:
+                _build_cn(slot, model_id)
+    return slot.cn[model_id]
 
 
 def _image2image(
+    slot,
     prompt: str,
     negative_prompt: str,
     image,
@@ -844,14 +950,14 @@ def _image2image(
 
     if control_type:
         ctl = _resolve_control(control_type)
-        pipe = _load_controlnet_pipeline(ctl["model"])
+        pipe = _ensure_cn(slot, ctl["model"])
         _apply_loras(pipe, lora_spec)
         control_img = _preprocess_control(source, control_type)
         control_img = control_img.resize((w, h), PILImage.LANCZOS)
         common["control_image"] = control_img
         common["controlnet_conditioning_scale"] = control_scale
     else:
-        pipe = _load_i2i_pipeline()
+        pipe = _ensure_i2i(slot)
         _apply_loras(pipe, lora_spec)
 
     result = _oom_retry(pipe, **common)
@@ -879,11 +985,11 @@ def _build_server():
     server = MCPServer(
         name="generate-image",
         version="0.1.0",
-        title="Image Generation (Stable Diffusion)",
+        title="Image Generation (SDXL)",
         instructions=(
-            "Generate images with a local Stable Diffusion pipeline running on the "
-            "host GPU. Tools return images inline as base64; the server never "
-            "writes files - the client saves them."
+            "Generate images with a local SDXL (Stable Diffusion XL) pipeline "
+            "running on the host GPU. Tools return images inline as base64; "
+            "the server never writes files - the client saves them."
         ),
     )
 
@@ -891,9 +997,9 @@ def _build_server():
         name="generate_image",
         title="Generate Image",
         description=(
-            "Generate an image from a text prompt using the local Stable Diffusion "
-            "model. Returns the generated image inline as base64 PNG; nothing is "
-            "written on the server - save the returned image client-side."
+            "Generate an image from a text prompt using the local SDXL "
+            "model. Returns the generated image inline as base64 PNG; nothing "
+            "is written on the server - save the returned image client-side."
         ),
     )
     async def generate_image(
@@ -903,7 +1009,7 @@ def _build_server():
         ],
         negative_prompt: Annotated[
             str,
-            Field(description="Things to avoid, e.g. 'blurry, low quality'. (FLUX models ignore negative prompts.)"),
+            Field(description="Things to avoid, e.g. 'blurry, low quality'."),
         ] = "",
         width: Annotated[
             int,
@@ -915,7 +1021,7 @@ def _build_server():
         ] = H_DEFAULT,
         num_inference_steps: Annotated[
             int,
-            Field(description="Denoising steps; clamped to 10..100 (typical 20-30 for SD1.5, 25-40 for SDXL)."),
+            Field(description="Denoising steps; clamped to 10..100 (typical 25-40 for SDXL)."),
         ] = STEPS_DEFAULT,
         guidance_scale: Annotated[
             float,
@@ -941,7 +1047,7 @@ def _build_server():
         - prompt: what to draw (English works best; be specific).
         - negative_prompt: things to avoid (e.g. "blurry, low quality").
         - width/height: image size in pixels (multiple of 8, 256..1024).
-        - num_inference_steps: 20-30 typical for SD1.5, 25-40 for SDXL.
+        - num_inference_steps: 25-40 typical.
         - guidance_scale: how closely to follow the prompt (1..15, ~7.5 default).
         - seed: fixed seed for reproducibility, -1 = random.
         - lora: apply LoRA adapter(s): 'huggingface/repo:weight' (default 1.0),
@@ -965,6 +1071,7 @@ def _build_server():
         t0 = time.time()
         try:
             image, actual_seed = await asyncio.to_thread(
+                _run_on_slot,
                 _generate,
                 prompt,
                 negative_prompt,
@@ -1017,7 +1124,7 @@ def _build_server():
         ],
         negative_prompt: Annotated[
             str,
-            Field(description="Things to avoid, e.g. 'blurry, low quality'. (FLUX ignores negative prompts; img2img is unavailable on FLUX.)"),
+            Field(description="Things to avoid, e.g. 'blurry, low quality'."),
         ] = "",
         strength: Annotated[
             float,
@@ -1094,6 +1201,7 @@ def _build_server():
         t0 = time.time()
         try:
             edited, actual_seed, _eff = await asyncio.to_thread(
+                _run_on_slot,
                 _image2image,
                 prompt,
                 negative_prompt,
@@ -1134,12 +1242,18 @@ def _build_server():
         import asyncio
 
         # Load off the event loop: the first call may load the model (minutes).
-        info = _pipe_info or (await asyncio.to_thread(_load_pipeline))[1]
+        def _ensure_slot0():
+            with _slot_ctx() as slot:
+                _ensure_txt(slot)
+                return slot.info, len(_slots)
+
+        info, n_slots = await asyncio.to_thread(_ensure_slot0)
         return (
             f"model={info.get('model')}\n"
             f"device={info.get('device')}\n"
             f"dtype={info.get('dtype')}\n"
             f"vram_gb={info.get('vram_gb')}\n"
+            f"concurrency_slots={n_slots}\n"
             f"load_seconds={info.get('load_seconds')}"
         )
 
@@ -1190,32 +1304,36 @@ def _smoke_test() -> int:
     smoke_dir.mkdir(parents=True, exist_ok=True)
     _log(f"Smoke test: model={MODEL_ID}, device={DEVICE}")
     try:
-        image, seed = _generate(
-            prompt="a red apple on a wooden table, studio lighting",
-            negative_prompt="blurry, low quality",
-            width=256,
-            height=256,
-            steps=2,
-            guidance=7.5,
-            seed=12345,
-        )
-        out = smoke_dir / "smoke_test.png"
-        image.save(out)
-        _log(f"Smoke test OK: saved {out} (seed={seed}), info={_pipe_info}")
-
-        # img2img check: reuse the generated image as a source.
-        try:
-            edited, seed2, _ = _image2image(
-                prompt="turn it into an oil painting, warm colors",
-                negative_prompt="blurry",
-                image=str(out),
-                strength=0.5,
+        with _slot_ctx() as slot:
+            image, seed = _generate(
+                slot,
+                prompt="a red apple on a wooden table, studio lighting",
+                negative_prompt="blurry, low quality",
                 width=256,
                 height=256,
                 steps=2,
                 guidance=7.5,
-                seed=999,
+                seed=12345,
             )
+        out = smoke_dir / "smoke_test.png"
+        image.save(out)
+        _log(f"Smoke test OK: saved {out} (seed={seed}), slots={len(_slots)}, info={_slots[0].info}")
+
+        # img2img check: reuse the generated image as a source.
+        try:
+            with _slot_ctx() as slot:
+                edited, seed2, _ = _image2image(
+                    slot,
+                    prompt="turn it into an oil painting, warm colors",
+                    negative_prompt="blurry",
+                    image=str(out),
+                    strength=0.5,
+                    width=256,
+                    height=256,
+                    steps=2,
+                    guidance=7.5,
+                    seed=999,
+                )
             out2 = smoke_dir / "smoke_test_img2img.png"
             edited.save(out2)
             _log(f"Smoke test img2img OK: saved {out2} (seed={seed2})")
@@ -1265,6 +1383,14 @@ def main() -> int:  # noqa: C901
         help="append [pictura-mcp] logs to a file (default: stderr / journald)",
     )
     args = parser.parse_args()
+    if not IS_XL:
+        print(
+            f"[pictura-mcp] IMAGE_MODEL={MODEL_ID!r} is not an SDXL-family "
+            "checkpoint (model id must contain 'xl')",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
     token = args.token or os.environ.get("PICTURA_MCP_TOKEN")
     http_port = args.port or int(os.environ.get("IMAGE_PORT", "8000"))
     http_host = args.host or os.environ.get("IMAGE_HOST", "127.0.0.1")
