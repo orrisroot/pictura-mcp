@@ -6,7 +6,19 @@
 #   deploy/install-systemd.sh [PROJECT_ROOT] [SERVICE_USER] [PORT]
 #   default: PROJECT_ROOT = script's repo root, SERVICE_USER = pictura-mcp, PORT = 8000
 #   PORT seeds IMAGE_PORT in the env file (an existing IMAGE_PORT value wins).
+#
+# Optional flag:
+#   --adopt-env  record the current env.example template as adopted (after you
+#                merged deploy/pictura-mcp.env.new) and drop the artifact.
 set -euo pipefail
+
+# Pull the optional --adopt-env flag out before positional parsing.
+ADOPT=0
+_args=()
+for _a in "$@"; do
+  if [[ "$_a" == "--adopt-env" ]]; then ADOPT=1; else _args+=("$_a"); fi
+done
+set -- "${_args[@]}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${1:-$(cd "$script_dir/.." && pwd)}"
@@ -44,9 +56,18 @@ fi
 
 echo "==> env file"
 ENV_FILE="$PROJECT_ROOT/deploy/pictura-mcp.env"
+TEMPLATE="$PROJECT_ROOT/deploy/pictura-mcp.env.example"
+NEW_FILE="$ENV_FILE.new"  # latest template rendered for this machine (no secrets)
+# sha256 of the raw env.example; the "recorded vs current" comparison only
+# tracks template changes (install args like PORT/root are not part of it).
+tpl_sha="$(sha256sum "$TEMPLATE" 2>/dev/null | awk '{print $1}')" || true
+tpl_sha="${tpl_sha:-unknown}"
+
+created_env=0
 if [[ ! -f "$ENV_FILE" ]]; then
-  cp "$PROJECT_ROOT/deploy/pictura-mcp.env.example" "$ENV_FILE"
+  cp "$TEMPLATE" "$ENV_FILE"
   sed -i "s/^PICTURA_MCP_TOKEN=.*/PICTURA_MCP_TOKEN=$(head -c24 /dev/urandom | base64 | tr -d '/+=')/" "$ENV_FILE"
+  created_env=1
 fi
 # seed_env KEY VALUE: skip when active; activate the "# KEY=..." template line; append otherwise.
 seed_env() {
@@ -67,6 +88,49 @@ seed_env IMAGE_PORT "$PORT"
 if [[ -n $CACHE_DIR ]]; then
   mkdir -p "$CACHE_DIR"
   chown -R "$SERVICE_USER":"$SERVICE_USER" "$CACHE_DIR"
+fi
+
+# ---- template drift tracking (non-destructive, rpmnew-style) ------------
+# The env file is operator-editable ("%config(noreplace)"). When env.example
+# changes we never touch the operator's values: we record a fingerprint of the
+# template in the env file, and when it no longer matches we write the current
+# rendered template to $NEW_FILE for the operator to diff/merge, then re-run
+# with --adopt-env once merged (old .new is refreshed, never accumulated).
+FP="^# *template-fingerprint:"
+recorded="$(grep -m1 "$FP" "$ENV_FILE" 2>/dev/null | sed "s|$FP||" || true)"
+recorded="${recorded#*:}"; recorded="${recorded//[[:space:]]/}"
+write_fingerprint() {  # $1 = sha
+  if grep -q "$FP" "$ENV_FILE"; then
+    sed -i "s|$FP.*|# template-fingerprint: $1|" "$ENV_FILE"
+  else
+    printf '\n# template-fingerprint: %s\n' "$1" >> "$ENV_FILE"
+  fi
+}
+if [[ $ADOPT -eq 1 ]]; then
+  write_fingerprint "$tpl_sha"
+  rm -f "$NEW_FILE"
+  echo "  adopted the current template (fingerprint updated; ${NEW_FILE##*/} removed)"
+  recorded="$tpl_sha"
+fi
+if [[ $created_env -eq 1 ]]; then
+  write_fingerprint "$tpl_sha"
+  echo "  created (token randomized; template fingerprint recorded)"
+elif [[ -z "$recorded" ]]; then
+  write_fingerprint "$tpl_sha"
+  echo "  existing env had no fingerprint - recording the current template"
+elif [[ "$tpl_sha" == "$recorded" ]]; then
+  echo "  synchronized with the current template"
+else
+  # template changed since the recorded fingerprint: keep the env, write .new
+  cp "$TEMPLATE" "$NEW_FILE"
+  sed -i -e "s#<PROJECT_ROOT>#$PROJECT_ROOT#g" \
+         -e "s|^# IMAGE_MODEL_CACHE_DIR=.*|IMAGE_MODEL_CACHE_DIR=$PROJECT_ROOT/.model-cache|" \
+         -e "s|^# IMAGE_HOST=.*|IMAGE_HOST=0.0.0.0|" \
+         -e "s|^# IMAGE_PORT=.*|IMAGE_PORT=$PORT|" "$NEW_FILE"
+  chmod 600 "$NEW_FILE"
+  echo "  template changed (your env file is untouched) - wrote the latest template to ${NEW_FILE##*/}"
+  echo "    diff:  diff $ENV_FILE $NEW_FILE"
+  echo "    then merge, drop ${NEW_FILE##*/}, and re-run with --adopt-env to record it"
 fi
 chmod o-w "$PROJECT_ROOT" 2>/dev/null || true   # keep project read-only for the service user
 chown "$SERVICE_USER":"$SERVICE_USER" "$ENV_FILE"
@@ -112,6 +176,9 @@ echo "  1. review the env file - the token is already randomized and the essenti
 echo "     (IMAGE_MODEL_CACHE_DIR / IMAGE_HOST / IMAGE_PORT) are pre-seeded;"
 echo "     edit only what needs changing:"
 echo "        sudoedit $ENV_FILE"
+echo "     If the installer said 'template changed', your env is untouched; the latest"
+echo "     template is saved as ${ENV_FILE##*/}.new - diff & merge it, then re-run with"
+echo "     --adopt-env to record it (new keys are still seeded every run)."
 echo "  2. start the service:"
 echo "        systemctl start pictura-mcp"
 PORT_EFF="$(grep '^IMAGE_PORT=' "$ENV_FILE" | cut -d= -f2-)"
@@ -130,3 +197,5 @@ echo "  - TO READ THE LOG FILE AS A NON-ROOT OPERATOR, add them to the log group
 echo "        sudo usermod -aG $SERVICE_USER <your-username>   # then re-login"
 echo "    (logrotate recreate uses group $SERVICE_USER - see deploy/logrotate.example)"
 echo "  - MemoryDenyWriteExecute may break torch; remove it from the unit if the service crashes."
+echo "  - env template drift: deploy/pictura-mcp.env.new is the current env.example"
+echo "    rendered for this machine (never contains secrets); --adopt-env records it."

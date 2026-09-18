@@ -2,6 +2,7 @@
 # the canonical shared client template is deploy/mcp.json.example
 .pi/
 deploy/pictura-mcp.env
+deploy/pictura-mcp.env.new
 
 # Python venv / deps / generated images
 .venv/

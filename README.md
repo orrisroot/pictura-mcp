@@ -247,6 +247,16 @@ read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>
 `MemoryDenyWriteExecute=true` from the unit (torch sometimes conflicts) and
 `systemctl daemon-reload && restart`.
 
+**Env template updates (non-destructive).** The installer records a sha256
+fingerprint of `deploy/pictura-mcp.env.example` in the env file. When the
+template changes, your `deploy/pictura-mcp.env` is left untouched and the
+current rendered template is saved as **`deploy/pictura-mcp.env.new`** (never
+contains secrets; `<PROJECT_ROOT>` / cache / host / port pre-filled for this
+machine), with a `diff` hint. Merge what you want, delete the file, then
+re-run the installer with **`--adopt-env`** to record the new template —
+new keys are seeded every run regardless, and an unmerged `.new` is
+regenerated each run so it never goes stale.
+
 **B) Current user (user scope, quick):**
 
 ```bash
