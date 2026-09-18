@@ -3,7 +3,7 @@
     "generate-image": {
       "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
       "headers": {
-        "Authorization": "Bearer <TOKEN>"
+        "PICTURE_API_KEY": "<TOKEN>"
       },
       "requestTimeoutMs": 600000,
       "toolPrefix": ""

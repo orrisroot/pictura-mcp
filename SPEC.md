@@ -94,7 +94,7 @@ Reports `model`, `device`, `dtype`, `offload`, `weights_gb`, `vram_gb`,
 **All tools return**: over **stdio** an `ImageContent` (base64 PNG, mime
 `image/png`) + a `TextContent` note; over **http/sse** a single `TextContent`
 note containing a short-lived download URL (`http://<base>/images/<id>`, TTL
-`PICTURA_IMAGE_URL_TTL`, default 600 s) plus optionally the bearer token in the
+`PICTURA_IMAGE_URL_TTL`, default 600 s) plus optionally `?token=<api-key>` in the
 URL when `PICTURA_IMAGE_URL_AUTH=token`. On failure a text error is returned.
 
 ---
@@ -156,7 +156,7 @@ python server/pictura_server.py [options]
 | `--transport stdio\|http\|sse` | `stdio` | MCP transport |
 | `--host` | `127.0.0.1` | bind address (use `0.0.0.0` for remote) |
 | `--port` | `8000` | TCP port |
-| `--token <t>` | none | require `Authorization: Bearer <t>` (http/sse) |
+| `--token <t>` | none | require the API key (http/sse) via the `PICTURE_API_KEY` header |
 | `--max-body-mb <n>` | 16 | max HTTP request body (http/sse); base64 image input lives here |
 | `--smoke` | — | self-test (txt2img + img2img) writing to `<repo>/outputs/` |
 
@@ -174,9 +174,9 @@ python server/pictura_server.py [options]
 
 ## 5. Security
 
-- **Remote transports require a bearer token** (see §6 `PICTURA_MCP_TOKEN`) when
-  the server is exposed beyond localhost. The GPU is otherwise reachable by any
-  caller.
+- **Remote transports require an API key** (see §6 `PICTURA_MCP_TOKEN`, sent via
+  the `PICTURE_API_KEY` header) when the server is exposed beyond localhost.
+  The GPU is otherwise reachable by any caller.
 - **Arbitrary-path writes are impossible**: tools accept no output path; the
   server never persists files.
 - **Privacy**: user prompts and tool arguments are **never written to logs**
@@ -193,8 +193,8 @@ python server/pictura_server.py [options]
 - **Image URLs are capability links**: each generated-image URL embeds an
   unguessable id (192-bit random) and expires after `PICTURA_IMAGE_URL_TTL`;
   images are cached in RAM only (never on disk) and vanish with the process.
-  With `PICTURA_IMAGE_URL_AUTH=token` fetching also requires the MCP bearer
-  token, so a leaked URL alone is not enough.
+  With `PICTURA_IMAGE_URL_AUTH=token` fetching also requires the API key, so a
+  leaked URL alone is not enough.
 - No output-directory control is offered: tools accept no output path and the
   server never persists images.
 
@@ -218,12 +218,12 @@ python server/pictura_server.py [options]
 | `PICTURA_IMAGE_URL_TTL` | `600` | seconds an image download URL stays valid |
 | `PICTURA_IMAGE_URL_MAX` | `64` | max images kept in the in-memory URL cache |
 | `PICTURA_IMAGE_URL_MAX_MB` | `512` | max total bytes of the URL cache |
-| `PICTURA_IMAGE_URL_AUTH` | `none` | `token` = also require the MCP bearer token to fetch `/images/*` |
+| `PICTURA_IMAGE_URL_AUTH` | `none` | `token` = also require the API key (`PICTURE_API_KEY` header or `?token=`) to fetch `/images/*` |
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
 | `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse |
 | `PICTURA_ALLOW_HOST_PATHS` | `auto` | force whether `edit_image` may read host file paths: `auto` (default) = allowed on stdio/local, denied over http/sse; `0` = always data-URI-only; `1` = always allow (operator's risk, token already gates remote) |
-| `PICTURA_MCP_TOKEN` | unset | bearer token; fallback when `--token` not given |
+| `PICTURA_MCP_TOKEN` | unset | API key; clients send it in the `PICTURE_API_KEY` header; fallback when `--token` not given |
 | `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
 ---
@@ -268,7 +268,7 @@ bound to any client. Every client stores server definitions in the same shape:
   "mcpServers": {
     "generate-image": {
       "url": "http://<HOST>:8000/mcp",
-      "headers": { "Authorization": "Bearer <TOKEN>" },
+      "headers": { "PICTURE_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000
     }
   }

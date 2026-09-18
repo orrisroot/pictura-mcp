@@ -36,8 +36,8 @@ URL image return (http/sse only):
                                   (default 600)
     PICTURA_IMAGE_URL_MAX            max cached images (default 64)
     PICTURA_IMAGE_URL_MAX_MB         max total cache bytes (default 512)
-    PICTURA_IMAGE_URL_AUTH           none (default) | token  - also require the MCP
-                                  bearer token on /images/*
+    PICTURA_IMAGE_URL_AUTH           none (default) | token  - also require the API key
+                                  on /images/*
 
 Client-supplied `lora` ids are restricted to a built-in default allowlist
 (override via PICTURA_LORA_ALLOWLIST); URLs/local paths are rejected and weights
@@ -65,7 +65,8 @@ Transports / remote access (CLI):
                                  16 MB body ≈ 12 MB image, ample for typical
                                  ~1.6 MB outputs and camera JPEGs. Raise only if
                                  you really need to pass very large images.
-    --token <token>              require "Authorization: Bearer <token>" on http/sse
+    --token <token>              require the API key on http/sse: clients send it via
+                                 the PICTURE_API_KEY header
     --log-file <path>            append [pictura-mcp] logs to a file (default: stderr)
 
 Run:
@@ -331,7 +332,7 @@ W_DEFAULT, H_DEFAULT = 1024, 1024
 # footprint of one job at the default resolution, and a fixed margin stays
 # free for decode spikes / other tenants. On a 32 GB V100 with SDXL fp16
 # (~7 GB weights) this yields 3 concurrent slots; on smaller cards it simply
-# degrades to 1 (= strictly serial, previous behavior).
+# degrades to 1 (= strictly serial).
 
 _SLOT_RESERVE_GB = 2.0        # VRAM margin that is never handed to extra slots
 _SLOT_ACT_BASE_GB = 1.5       # per-job activation floor (fp16)
@@ -716,9 +717,8 @@ def _load_source_image(image_src: str):
 
 def _edit_dim(v: int) -> int:
     """Clamp an edit_image width/height. 0 = keep source size; any positive
-    value is rounded to a multiple of 8 and clamped to [256, 1024], so tiny
-    inputs (e.g. 4 px) become the 256 px floor instead of silently rounding
-    down to 0 and meaning 'keep source'."""
+    value is rounded to a multiple of 8 and clamped to [256, 1024] (tiny inputs
+    such as 4 px land on the 256 px floor)."""
     if v <= 0:
         return 0
     return max(256, min(1024, max(1, round(v / 8)) * 8))
@@ -1645,7 +1645,7 @@ def main() -> int:  # noqa: C901
     parser.add_argument(
         "--token",
         default=None,
-        help="require Bearer token on http/sse (falls back to $PICTURA_MCP_TOKEN)",
+        help="require API key on http/sse via PICTURE_API_KEY header (falls back to $PICTURA_MCP_TOKEN)",
     )
     parser.add_argument(
         "--log-file",
@@ -1722,8 +1722,19 @@ def main() -> int:  # noqa: C901
     return 0
 
 
+def _auth_ok(request, token: str | None) -> bool:
+    """Authorization check used on /mcp and /images.
+
+    The API key must be sent in the PICTURE_API_KEY header; token=None (no key
+    configured) allows all requests.
+    """
+    if not token:
+        return True
+    return request.headers.get("picture_api_key") == token
+
+
 def _attach_http_middleware(mcp_app, token: str | None):
-    """Add GET /images/{img_id} and the bearer-token check to the MCP app.
+    """Add GET /images/{img_id} and the API-key check to the MCP app.
 
     Applied as middleware ON the MCP app itself, and uvicorn runs that app as
     the top-level ASGI app, so the MCP session manager's lifespan (task-group
@@ -1731,8 +1742,8 @@ def _attach_http_middleware(mcp_app, token: str | None):
     would skip that lifespan and crash with "Task group is not initialized".
 
     The image id is an unguessable secret, so the URL itself is the capability;
-    PICTURA_IMAGE_URL_AUTH=token additionally requires the MCP bearer token
-    (header or ?token= query param for simple fetch tools).
+    PICTURA_IMAGE_URL_AUTH=token additionally requires the API key (header or
+    ?token= query param for simple fetch tools).
     """
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse, Response
@@ -1740,9 +1751,8 @@ def _attach_http_middleware(mcp_app, token: str | None):
     async def _serve_image(request):
         img_id = request.url.path[len("/images/"):]
         if _URL_AUTH == "token":
-            auth_ok = request.headers.get("authorization", "") == f"Bearer {token}"
-            auth_ok = auth_ok or request.query_params.get("token") == token
-            if not auth_ok:
+            qtoken = request.query_params.get("token")
+            if not (_auth_ok(request, token) or (qtoken is not None and qtoken == token)):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         data = _img_cache.get(img_id)
         if data is None:
@@ -1752,7 +1762,7 @@ def _attach_http_middleware(mcp_app, token: str | None):
     async def _dispatch(request, call_next):
         if request.url.path.startswith("/images/"):
             return await _serve_image(request)
-        if token and request.headers.get("authorization", "") != f"Bearer {token}":
+        if not _auth_ok(request, token):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
 
@@ -1785,7 +1795,7 @@ def _run_http_server(
     if token:
         _log(
             f"MCP {transport} server: http://{host}:{port}{path} "
-            f"(auth: Bearer token, max body {max_body_bytes // (1024 * 1024)} MB)"
+            f"(auth: API key, max body {max_body_bytes // (1024 * 1024)} MB)"
         )
     else:
         _log(

@@ -169,9 +169,9 @@ You can also run the server as an independent process that clients reach over
 
 - `--transport http` (endpoint `/mcp`) or `--transport sse` (endpoint `/sse`);
   `--host 127.0.0.1` is the safe default — use `0.0.0.0` for remote clients
-- `--token <token>` (or env `PICTURA_MCP_TOKEN`) requires
-  `Authorization: Bearer <token>` on every request; **always set it when the
-  server is reachable beyond localhost**
+- `--token <token>` (or env `PICTURA_MCP_TOKEN`) requires the API key on every
+  request via the **`PICTURE_API_KEY`** header; **always set it when the server
+  is reachable beyond localhost**
 - **Host files are not read remotely**: over http/sse, `edit_image` accepts
   only `data:` URIs — no server-side file paths / `file://` URIs (secure
   default). Only a **local stdio run** may read host paths (see § Image
@@ -199,7 +199,7 @@ Remote client config (`deploy/mcp.remote.json.example`):
   "mcpServers": {
     "generate-image": {
       "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
-      "headers": { "Authorization": "Bearer <TOKEN>" },
+      "headers": { "PICTURE_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000,
       "toolPrefix": ""
     }
@@ -240,7 +240,7 @@ journalctl -u pictura-mcp -f
 
 # client config: copy deploy/mcp.remote.json.example and set
 #   url: http://<this-box-ip>:8000/mcp   (port = PICTURA_PORT from the env file)
-#   Authorization: Bearer <PICTURA_MCP_TOKEN from deploy/pictura-mcp.env>
+#   PICTURE_API_KEY: <PICTURA_MCP_TOKEN from deploy/pictura-mcp.env>
 ```
 
 ```bash
@@ -263,15 +263,14 @@ read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>
 `MemoryDenyWriteExecute=true` from the unit (torch sometimes conflicts) and
 `systemctl daemon-reload && restart`.
 
-**Env template updates (non-destructive).** The installer records a sha256
-fingerprint of `deploy/pictura-mcp.env.example` in the env file. When the
-template changes, your `deploy/pictura-mcp.env` is left untouched and the
-current rendered template is saved as **`deploy/pictura-mcp.env.new`** (never
-contains secrets; `<PROJECT_ROOT>` / cache / host / port pre-filled for this
-machine), with a `diff` hint. Merge what you want, delete the file, then
-re-run the installer with **`--adopt-env`** to record the new template —
-new keys are seeded every run regardless, and an unmerged `.new` is
-regenerated each run so it never goes stale.
+**Env updates (auto-sync).** The installer syncs `deploy/pictura-mcp.env` from
+`deploy/pictura-mcp.env.example` on every run: template keys that are not yet
+set are added with their current defaults, machine-specific values
+(`<PROJECT_ROOT>` / cache / host / port) are rendered, a placeholder or empty
+`PICTURA_MCP_TOKEN` is replaced with a generated `sk-pictura-...` key, and a
+fingerprint is recorded. **Values you set are always preserved** — only missing
+keys are filled. The run reports the added/activated keys; if you edit the env
+by hand, its values survive subsequent installs.
 
 **B) Current user (user scope, quick):**
 
@@ -329,7 +328,7 @@ model copy). `--smoke` also exercises the img2img path.
 - GPU selection: set `PICTURA_CUDA_DEVICE` (e.g. `0` or `0,1`) to restrict which
   CUDA GPU(s) the server uses (`CUDA_VISIBLE_DEVICES`).
 - Log destination: set `PICTURA_LOG_FILE` (or `--log-file <path>`) to append the
-  `[pictura-mcp]` log to a file instead of stderr/journald (handy for systemd).
+  `[pictura-mcp]` log to a file (default: stderr/journald).
 - Host-path image input: `PICTURA_ALLOW_HOST_PATHS=0|1` forces whether
   `edit_image` may read host file paths (default: allowed on stdio/local,
   denied over http/sse — see § Image editing).
