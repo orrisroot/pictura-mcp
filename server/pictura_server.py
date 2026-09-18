@@ -1722,19 +1722,23 @@ def main() -> int:  # noqa: C901
     return 0
 
 
-def _wrap_http_app(mcp_app, token: str | None):
-    """Wrap an MCP Starlette app with GET /images/{img_id} (short-term cache).
+def _attach_http_middleware(mcp_app, token: str | None):
+    """Add GET /images/{img_id} and the bearer-token check to the MCP app.
+
+    Applied as middleware ON the MCP app itself, and uvicorn runs that app as
+    the top-level ASGI app, so the MCP session manager's lifespan (task-group
+    init) still runs. Wrapping the app in another Starlette app with Mount
+    would skip that lifespan and crash with "Task group is not initialized".
 
     The image id is an unguessable secret, so the URL itself is the capability;
     PICTURA_IMAGE_URL_AUTH=token additionally requires the MCP bearer token
     (header or ?token= query param for simple fetch tools).
     """
-    from starlette.applications import Starlette
+    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse, Response
-    from starlette.routing import Mount, Route
 
     async def _serve_image(request):
-        img_id = request.path_params["img_id"]
+        img_id = request.url.path[len("/images/"):]
         if _URL_AUTH == "token":
             auth_ok = request.headers.get("authorization", "") == f"Bearer {token}"
             auth_ok = auth_ok or request.query_params.get("token") == token
@@ -1745,12 +1749,14 @@ def _wrap_http_app(mcp_app, token: str | None):
             return JSONResponse({"error": "image not found or expired"}, status_code=404)
         return Response(content=data, media_type="image/png")
 
-    return Starlette(
-        routes=[
-            Route("/images/{img_id}", _serve_image, methods=["GET"]),
-            Mount("/", app=mcp_app),
-        ]
-    )
+    async def _dispatch(request, call_next):
+        if request.url.path.startswith("/images/"):
+            return await _serve_image(request)
+        if token and request.headers.get("authorization", "") != f"Bearer {token}":
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+    mcp_app.add_middleware(BaseHTTPMiddleware, dispatch=_dispatch)
 
 
 def _run_http_server(
@@ -1763,8 +1769,6 @@ def _run_http_server(
 ) -> int:
     """Serve the MCP server over HTTP(S) so remote clients can connect."""
     import uvicorn
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse
 
     if transport == "sse":
         mcp_app = server.sse_app(
@@ -1777,14 +1781,8 @@ def _run_http_server(
         )
         path = "/mcp"
 
+    _attach_http_middleware(mcp_app, token)
     if token:
-        async def _require_token(request, call_next):
-            auth = request.headers.get("authorization", "")
-            if auth != f"Bearer {token}":
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await call_next(request)
-
-        mcp_app.add_middleware(BaseHTTPMiddleware, dispatch=_require_token)
         _log(
             f"MCP {transport} server: http://{host}:{port}{path} "
             f"(auth: Bearer token, max body {max_body_bytes // (1024 * 1024)} MB)"
@@ -1796,7 +1794,7 @@ def _run_http_server(
         )
 
     uvicorn.run(
-        _wrap_http_app(mcp_app, token),
+        mcp_app,
         host=host,
         port=port,
         log_level="warning",
