@@ -167,6 +167,10 @@ You can also run the server as an independent process that clients reach over
 - `--token <token>` (or env `PICTURA_MCP_TOKEN`) requires
   `Authorization: Bearer <token>` on every request; **always set it when the
   server is reachable beyond localhost**
+- **Host files are not read remotely**: over http/sse, `edit_image` accepts
+  only `data:` URIs — no server-side file paths / `file://` URIs (secure
+  default). Only a **local stdio run** may read host paths (see § Image
+  editing / `IMAGE_ALLOW_HOST_PATHS`).
 - `--max-body-mb <MB>` (default 16) caps the HTTP request body; base64 images
   arrive in the body
 - The server is **stateless**: no image files are written on the server in any
@@ -278,8 +282,10 @@ runtime also auto-offloads and retries.
 
 `edit_image(prompt, image, ...)` transforms an existing image:
 
-- **`image`**: host-local file path, `file://` URI, or `data:image/...;base64,...`
-  URI (portable across machines)
+- **`image`**: a local file path or `file://` URI on a **local stdio run**, or a
+  `data:image/...;base64,...` URI (works everywhere — portable across machines).
+  Over **http/sse (remote)** the server reads no host files: `data:` URIs only
+  (secure default). Override the default with `IMAGE_ALLOW_HOST_PATHS=0|1`.
 - **`strength`** (0..1, default 0.6): higher = larger change
 - **`width`/`height`** (0 = keep source size; clamp ≤1024, multiple of 8)
 
@@ -298,6 +304,9 @@ model copy). `--smoke` also exercises the img2img path.
   CUDA GPU(s) the server uses (`CUDA_VISIBLE_DEVICES`).
 - Log destination: set `IMAGE_LOG_FILE` (or `--log-file <path>`) to append the
   `[pictura-mcp]` log to a file instead of stderr/journald (handy for systemd).
+- Host-path image input: `IMAGE_ALLOW_HOST_PATHS=0|1` forces whether
+  `edit_image` may read host file paths (default: allowed on stdio/local,
+  denied over http/sse — see § Image editing).
   Logrotate-ready: the server reopens its log file on `SIGHUP`, and a
   `copytruncate`-based config is provided in `deploy/logrotate.example`.
   **Privacy: user prompts and tool arguments are never written to any log.**

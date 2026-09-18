@@ -31,7 +31,10 @@ VS Code, Windsurf, local agent frameworks, …) can connect.
   where to save. Text-only clients must decode the base64 (data field) into a
   file and open it to inspect the result (the tool descriptions and the result
   note instruct this).
-- **Identical local & remote behavior**: no mode-dependent output handling.
+- **Identical local & remote behavior**: no mode-dependent output handling
+  (results are always returned inline; nothing is written to disk). One
+  deliberate exception: `edit_image` may read host file paths on a local stdio
+  run but not over http/sse (see §2 / §5) — convenient locally, secure remotely.
 - **Concurrency**: requests are accepted concurrently (the event loop never
   blocks on GPU work). Rendering runs on a slot pool; the pool size is derived
   from measured free VRAM (per extra slot: another full weight set + activation
@@ -65,7 +68,7 @@ Edits an existing image with a prompt (img2img).
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `prompt` | string | — | required |
-| `image` | string | — | required. Source image: host-local file path, `file://` URI, or `data:image/...;base64,...` URI (portable across machines) |
+| `image` | string | — | required. Source image: local file path / `file://` URI (local stdio run only) or `data:image/...;base64,...` URI (everywhere, portable). Over http/sse only `data:` URIs are accepted — the server reads no host files (`IMAGE_ALLOW_HOST_PATHS` forces it either way) |
 | `negative_prompt` | string | `""` | |
 | `strength` | float | 0.6 | 0..1, higher = more change |
 | `width` / `height` | int | 0 | 0 = keep source size; clamped to [256, 1024], multiple of 8 |
@@ -170,6 +173,13 @@ python server/pictura_server.py [options]
   (by design; `_log` only receives internal status text, and framework loggers
   are capped at WARNING so request data is not emitted).
 - Input images (data URIs) are decoded in memory only; not retained.
+- **`edit_image` reads host files only on a local stdio run**: over http/sse,
+  `edit_image` accepts source images only as `data:image/...;base64,...` URIs —
+  server-side file paths / `file://` URIs are rejected outright (a
+  `ValueError`), so a remote client cannot point the server at an arbitrary
+  host file. A local (stdio) run may read paths because the client is on the
+  same host and already trusted with the filesystem; `IMAGE_ALLOW_HOST_PATHS`
+  forces either behavior explicitly (the tool schema reflects the mode).
 - Remote `output_dir`-style control is not offered at all (removed by design).
 
 ---
@@ -189,6 +199,7 @@ python server/pictura_server.py [options]
 | `IMAGE_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `IMAGE_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
 | `IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse |
+| `IMAGE_ALLOW_HOST_PATHS` | `auto` | force whether `edit_image` may read host file paths: `auto` (default) = allowed on stdio/local, denied over http/sse; `0` = always data-URI-only; `1` = always allow (operator's risk, token already gates remote) |
 | `PICTURA_MCP_TOKEN` | unset | bearer token; fallback when `--token` not given |
 | `IMAGE_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 

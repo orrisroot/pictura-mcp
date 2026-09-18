@@ -63,7 +63,7 @@ generate_image(
 ```
 edit_image(
   prompt,                       # required
-  image,                        # required: file path, file://, or data:image URI
+  image,                        # required: file path (stdio/local) or data:image URI (anywhere)
   negative_prompt = "",
   strength = 0.6,               # 0..1; higher = bigger change
   width = 0, height = 0,        # 0 = keep source size, clamp ≤1024
@@ -97,6 +97,10 @@ and steers the edit; it is **SDXL-only**.
 ## Notes
 
 - First calls may download/load models and prefetch; expect them to be slow.
+- **`edit_image` source input**: on a local stdio run you may pass a host file
+  path or `file://` URI; over http/sse only a `data:image/...;base64,...` URI is
+  accepted (the server never reads host files remotely). The tool schema shows
+  which mode applies.
 - Sizes must be multiples of 8 within [256, 1024].
 - **Privacy**: never write the user's prompt into log files, notes, or other
   persistent text.

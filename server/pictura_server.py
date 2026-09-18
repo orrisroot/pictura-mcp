@@ -17,6 +17,9 @@ Configuration (environment variables):
     IMAGE_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
     IMAGE_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
     IMAGE_SKIP_PREFETCH=1         skip pre-downloading allowlisted models at startup
+    IMAGE_ALLOW_HOST_PATHS         force whether edit_image may read host file paths:
+                                  auto (default) = allowed on stdio/local, denied over
+                                  http/sse; 0 = always data-URI-only; 1 = always allow
     IMAGE_MAX_CONCURRENT          concurrent rendering slots (default "auto": sized
                                   from measured free VRAM; integer pins the pool;
                                   1 = strictly serial). Each slot is an independent
@@ -31,6 +34,11 @@ load safetensors-only. ControlNet is exposed as an abstract `control_type`
 (e.g. 'canny'); the backing model/preprocessor stay server-side and are picked
 from an internal allowlist (IMAGE_CONTROLNET_ALLOWLIST). Allowlisted models are
 pre-downloaded into the cache at service startup.
+
+`edit_image` reads host image paths only on a local stdio run (and when
+IMAGE_ALLOW_HOST_PATHS forces it); over http/sse it accepts only in-memory
+data:image/...;base64,... URIs, so the server never touches the remote host's
+filesystem.
 
 Generated images are never written to disk on the server: they are always
 returned inline as base64 and the client (e.g. the coding agent) is responsible
@@ -549,22 +557,64 @@ def _ensure_i2i(slot):
     return slot.i2i
 
 
+# Whether edit_image may read server-side file paths / file:// URIs.
+# Default: only when the client is local (stdio) - remote (http/sse) stays
+# data-URI-only (secure default). IMAGE_ALLOW_HOST_PATHS=0|1 forces it either
+# way (set in main() from the transport + override).
+_ALLOW_HOST_PATHS = False
+
+
+def _resolve_host_paths(transport: str, smoke: bool = False) -> bool:
+    """Decide whether edit_image may read host file paths this run."""
+    override = (os.environ.get("IMAGE_ALLOW_HOST_PATHS") or "").strip().lower()
+    if override in ("0", "false", "no", "off"):
+        return False
+    if override in ("1", "true", "yes", "on"):
+        return True
+    return transport == "stdio" or smoke
+
+
 def _load_source_image(image_src: str):
-    """Accept a local file path, a file:// URI, or a data:image/...;base64,... URI."""
+    """Load the edit_image source image.
+
+    Accepted:
+      - a data:image/...;base64,... URI (always - portable across machines);
+      - a local file path or file:// URI, but only when host-path reads are
+        enabled for this run (local stdio client by default). Over http/sse
+        the server never reads host files - that removes the
+        data-exfiltration vector for remote deployments.
+    """
     from PIL import Image as PILImage
 
     src = image_src.strip()
     if src.startswith("data:"):
         _meta, b64 = src.split(",", 1)
         return PILImage.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
-    if src.startswith("file://"):
-        src = src[len("file://"):]
-    try:
-        return PILImage.open(src).convert("RGB")
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"image not found: {src} (pass a local file path or a data: URI)"
-        )
+    if _ALLOW_HOST_PATHS:
+        if src.startswith("file://"):
+            src = src[len("file://"):]
+        try:
+            return PILImage.open(src).convert("RGB")
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"image not found: {src} (pass a local file path, a file:// URI, "
+                "or a data: URI)"
+            )
+    raise ValueError(
+        "image must be a data:image/...;base64,... URI (server-side file paths "
+        "and file:// URIs are not accepted over http/sse - the server never "
+        "reads host files remotely)"
+    )
+
+
+def _edit_dim(v: int) -> int:
+    """Clamp an edit_image width/height. 0 = keep source size; any positive
+    value is rounded to a multiple of 8 and clamped to [256, 1024], so tiny
+    inputs (e.g. 4 px) become the 256 px floor instead of silently rounding
+    down to 0 and meaning 'keep source'."""
+    if v <= 0:
+        return 0
+    return max(256, min(1024, max(1, round(v / 8)) * 8))
 
 
 def _i2i_dims(source_w: int, source_h: int, width: int, height: int):
@@ -981,6 +1031,39 @@ def _finalize_result(image, actual_seed: int, t0: float, prefix: str = "img") ->
 # MCP server
 # --------------------------------------------------------------------------
 
+# edit_image source-image wording. Chosen at server-build time from
+# _ALLOW_HOST_PATHS (stdio/local = paths allowed; http/sse = data URI only).
+# Module-level constants because tool annotations are stringified (postponed
+# evaluation) and must resolve against module globals - enclosing locals are
+# not visible to inspect.signature(eval_str=True).
+_EDIT_IMAGE_DESC_LOCAL = (
+    "Transform an existing image using a text prompt (img2img). Pass the "
+    "source as a local file path (server host), a file:// URI, or a "
+    "data:image/...;base64,... URI. Returns the edited image inline as "
+    "base64 PNG (ImageContent) - nothing is written to the server disk. "
+    "To see or verify it, decode the returned base64 (data field of the "
+    "first content block) into a local file and open it."
+)
+_EDIT_IMAGE_DESC_REMOTE = (
+    "Transform an existing image using a text prompt (img2img). Pass the "
+    "source as a data:image/...;base64,... URI (server-side file paths "
+    "and file:// URIs are NOT accepted - the server never reads host "
+    "files over http/sse). Returns the edited image inline as base64 PNG "
+    "(ImageContent) - nothing is written to the server disk. "
+    "To see or verify it, decode the returned base64 (data field of the "
+    "first content block) into a local file and open it."
+)
+_IMG_FIELD_DESC_LOCAL = (
+    "Source image: a local file path (server host), a file:// URI, or a "
+    "data:image/...;base64,... URI (this is a local stdio run)."
+)
+_IMG_FIELD_DESC_REMOTE = (
+    "Source image as a data:image/...;base64,... URI. Server-side file "
+    "paths and file:// URIs are not accepted over http/sse - the server "
+    "never reads host files."
+)
+
+
 def _build_server():
     server = MCPServer(
         name="generate-image",
@@ -1109,14 +1192,7 @@ def _build_server():
     @server.tool(
         name="edit_image",
         title="Edit Image (img2img)",
-        description=(
-            "Transform an existing image using a text prompt (img2img). Pass the "
-            "source as a local file path (server host), a file:// URI, or a "
-            "data:image/...;base64,... URI. Returns the edited image inline as "
-            "base64 PNG (ImageContent) - nothing is written to the server disk. "
-            "To see or verify it, decode the returned base64 (data field of the "
-            "first content block) into a local file and open it."
-        ),
+        description=_EDIT_IMAGE_DESC_LOCAL if _ALLOW_HOST_PATHS else _EDIT_IMAGE_DESC_REMOTE,
     )
     async def edit_image(
         prompt: Annotated[
@@ -1125,12 +1201,7 @@ def _build_server():
         ],
         image: Annotated[
             str,
-            Field(
-                description=(
-                    "Source image: local file path (on the server host), a file:// URI, "
-                    "or a data:image/...;base64,... URI."
-                ),
-            ),
+            Field(description=_IMG_FIELD_DESC_LOCAL if _ALLOW_HOST_PATHS else _IMG_FIELD_DESC_REMOTE),
         ],
         negative_prompt: Annotated[
             str,
@@ -1196,8 +1267,8 @@ def _build_server():
         """
         steps = max(10, min(100, num_inference_steps))
         strength = max(0.01, min(1.0, strength))
-        width = max(0, min(1024, (round(width / 8) * 8) if width else 0))
-        height = max(0, min(1024, (round(height / 8) * 8) if height else 0))
+        width = _edit_dim(width)
+        height = _edit_dim(height)
 
         import asyncio
 
@@ -1330,7 +1401,19 @@ def _smoke_test() -> int:
         image.save(out)
         _log(f"Smoke test OK: saved {out} (seed={seed}), slots={len(_slots)}, info={_slots[0].info}")
 
-        # img2img check: reuse the generated image as a source.
+        # img2img check: reuse the generated image. On a local (stdio/smoke)
+        # run host file paths are allowed, so pass the saved path; also assert
+        # the portable data: URI loads.
+        import io as _io
+        import base64 as _b64
+
+        _buf = _io.BytesIO()
+        image.save(_buf, format="PNG")
+        _src_uri = "data:image/png;base64," + _b64.b64encode(_buf.getvalue()).decode("ascii")
+        if _load_source_image(_src_uri).size != (256, 256):
+            raise AssertionError("data URI load mismatch")
+        if not _ALLOW_HOST_PATHS or _load_source_image(str(out)).size != (256, 256):
+            raise AssertionError("host path load mismatch (local run should allow paths)")
         try:
             with _slot_ctx() as slot:
                 edited, seed2, _ = _image2image(
@@ -1406,6 +1489,14 @@ def main() -> int:  # noqa: C901
     http_port = args.port or int(os.environ.get("IMAGE_PORT", "8000"))
     http_host = args.host or os.environ.get("IMAGE_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
+    # edit_image host-path reads: allowed for a local stdio client, denied over
+    # http/sse unless IMAGE_ALLOW_HOST_PATHS forces otherwise.
+    global _ALLOW_HOST_PATHS
+    _ALLOW_HOST_PATHS = _resolve_host_paths(args.transport, args.smoke)
+    if _ALLOW_HOST_PATHS:
+        _log("edit_image: host file paths allowed (local stdio run)")
+    else:
+        _log("edit_image: host file paths disabled (http/sse) - data: URIs only")
     # logrotate support: reopen the configured log file on SIGHUP.
     try:
         import signal
