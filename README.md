@@ -262,14 +262,15 @@ read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>
 `MemoryDenyWriteExecute=true` from the unit (torch sometimes conflicts) and
 `systemctl daemon-reload && restart`.
 
-**Env updates (auto-sync).** The installer syncs `deploy/pictura-mcp.env` from
-`deploy/pictura-mcp.env.example` on every run: template keys that are not yet
-set are added with their current defaults, machine-specific values
-(`<PROJECT_ROOT>` / cache / host / port) are rendered, a placeholder or empty
-`PICTURE_API_KEY` is replaced with a generated `sk-pictura-...` key, and a
-fingerprint is recorded. **Values you set are always preserved** — only missing
-keys are filled. The run reports the added/activated keys; if you edit the env
-by hand, its values survive subsequent installs.
+**Env template change (non-destructive).** The installer records a sha256
+fingerprint of `deploy/pictura-mcp.env.example` in the env file. When the
+template changes, your `deploy/pictura-mcp.env` is left untouched and the
+current rendered template is written to **`deploy/pictura-mcp.env.new`**
+(machine values such as cache / host / port pre-filled, and the `PICTURE_API_KEY`
+carried over from your env so merging it keeps clients working). Diff & merge
+what you want, delete the file, then re-run the installer with **`--adopt-env`**
+to record the template and clear the notice. The API key is generated on first
+install and kept afterwards.
 
 **B) Current user (user scope, quick):**
 
