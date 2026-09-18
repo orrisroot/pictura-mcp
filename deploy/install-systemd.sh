@@ -108,13 +108,13 @@ CACHE_DIR="$(grep '^PICTURA_MODEL_CACHE_DIR=' "$ENV_FILE" | cut -d= -f2- || true
 
 # The API key must be real: generate an sk-pictura-... key when missing/
 # placeholder; an existing custom key is kept.
-cur_key="$(grep '^PICTURE_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+cur_key="$(grep '^PICTURA_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
 if [[ $created -eq 1 || -z "$cur_key" || "$cur_key" == *"change-me"* ]]; then
   gen="sk-pictura-$(head -c18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  if grep -q '^PICTURE_API_KEY=' "$ENV_FILE"; then
-    sed -i "s|^PICTURE_API_KEY=.*|PICTURE_API_KEY=${gen}|" "$ENV_FILE"
+  if grep -q '^PICTURA_API_KEY=' "$ENV_FILE"; then
+    sed -i "s|^PICTURA_API_KEY=.*|PICTURA_API_KEY=${gen}|" "$ENV_FILE"
   else
-    printf 'PICTURE_API_KEY=%s\n' "$gen" >> "$ENV_FILE"
+    printf 'PICTURA_API_KEY=%s\n' "$gen" >> "$ENV_FILE"
   fi
   cur_key="$gen"
   echo "  API key: generated (${gen:0:11}...)"
@@ -139,7 +139,7 @@ else
          -e "s|^# PICTURA_MODEL_CACHE_DIR=.*|PICTURA_MODEL_CACHE_DIR=$PROJECT_ROOT/.model-cache|" \
          -e "s|^# PICTURA_HOST=.*|PICTURA_HOST=0.0.0.0|" \
          -e "s|^# PICTURA_PORT=.*|PICTURA_PORT=$PORT|" \
-         -e "s|^PICTURE_API_KEY=.*|PICTURE_API_KEY=${cur_key}|" "$NEW_FILE"
+         -e "s|^PICTURA_API_KEY=.*|PICTURA_API_KEY=${cur_key}|" "$NEW_FILE"
   chmod 600 "$NEW_FILE"
   echo "  template changed - your env is untouched; wrote ${NEW_FILE##*/}"
   echo "    diff:  diff $ENV_FILE $NEW_FILE"
@@ -198,7 +198,7 @@ echo "  1. review  $ENV_FILE          (API key + essentials pre-populated)"
 echo "  2. start   systemctl start pictura-mcp"
 echo "  3. watch   journalctl -u pictura-mcp -f   (until 'Model ready' appears)"
 echo "  4. client  http://<this-box-ip>:${PORT_EFF}/mcp   with the header"
-echo "             PICTURE_API_KEY: <the key in $ENV_FILE>"
+echo "             PICTURA_API_KEY: <the key in $ENV_FILE>"
 echo "             config template: deploy/mcp.remote.json.example"
 if [[ -f "$NEW_FILE" ]]; then
 echo

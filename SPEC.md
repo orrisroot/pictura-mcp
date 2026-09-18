@@ -155,7 +155,7 @@ python server/pictura_server.py [options]
 | `--transport stdio\|http\|sse` | `stdio` | MCP transport |
 | `--host` | `127.0.0.1` | bind address (use `0.0.0.0` for remote) |
 | `--port` | `8000` | TCP port |
-| `--api-key <key>` | none | require the API key (http/sse) via the `PICTURE_API_KEY` header |
+| `--api-key <key>` | none | require the API key (http/sse) via the `PICTURA_API_KEY` header |
 | `--max-body-mb <n>` | 16 | max HTTP request body (http/sse); base64 image input lives here |
 | `--smoke` | — | self-test (txt2img + img2img) writing to `<repo>/outputs/` |
 
@@ -173,8 +173,8 @@ python server/pictura_server.py [options]
 
 ## 5. Security
 
-- **Remote transports require an API key** (see §6 `PICTURE_API_KEY`, sent via
-  the `PICTURE_API_KEY` header) when the server is exposed beyond localhost.
+- **Remote transports require an API key** (see §6 `PICTURA_API_KEY`, sent via
+  the `PICTURA_API_KEY` header) when the server is exposed beyond localhost.
   The GPU is otherwise reachable by any caller.
 - **Arbitrary-path writes are impossible**: tools accept no output path; the
   server never persists files.
@@ -217,7 +217,7 @@ python server/pictura_server.py [options]
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
 | `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse |
-| `PICTURE_API_KEY` | unset | API key; clients send it in the `PICTURE_API_KEY` header; fallback when `--api-key` not given |
+| `PICTURA_API_KEY` | unset | API key; clients send it in the `PICTURA_API_KEY` header; fallback when `--api-key` not given |
 | `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
 ---
@@ -262,7 +262,7 @@ bound to any client. Every client stores server definitions in the same shape:
   "mcpServers": {
     "pictura": {
       "url": "http://<HOST>:8000/mcp",
-      "headers": { "PICTURE_API_KEY": "<TOKEN>" },
+      "headers": { "PICTURA_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000
     }
   }

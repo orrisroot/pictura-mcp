@@ -3,7 +3,7 @@
     "pictura": {
       "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
       "headers": {
-        "PICTURE_API_KEY": "<TOKEN>"
+        "PICTURA_API_KEY": "<TOKEN>"
       },
       "requestTimeoutMs": 600000,
       "toolPrefix": ""

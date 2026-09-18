@@ -169,8 +169,8 @@ You can also run the server as an independent process that clients reach over
 
 - `--transport http` (endpoint `/mcp`) or `--transport sse` (endpoint `/sse`);
   `--host 127.0.0.1` is the safe default — use `0.0.0.0` for remote clients
-- `--api-key <key>` (or env `PICTURE_API_KEY`) requires the API key on every
-  request via the **`PICTURE_API_KEY`** header; **always set it when the server
+- `--api-key <key>` (or env `PICTURA_API_KEY`) requires the API key on every
+  request via the **`PICTURA_API_KEY`** header; **always set it when the server
   is reachable beyond localhost**
 - **Host files are not read remotely**: over http/sse, `edit_image` accepts
   only `data:` URIs — no server-side file paths / `file://` URIs (secure
@@ -198,7 +198,7 @@ Remote client config (`deploy/mcp.remote.json.example`):
   "mcpServers": {
     "pictura": {
       "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
-      "headers": { "PICTURE_API_KEY": "<TOKEN>" },
+      "headers": { "PICTURA_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000,
       "toolPrefix": ""
     }
@@ -226,7 +226,7 @@ sudo deploy/install-systemd.sh /absolute/path/to/this/repo pictura-mcp 8000
 The installer prints the next steps; the essentials are already prepared:
 
 - `deploy/pictura-mcp.env` is created from the template with an
-  **auto-randomized `PICTURE_API_KEY`**, and `PICTURA_MODEL_CACHE_DIR` /
+  **auto-randomized `PICTURA_API_KEY`**, and `PICTURA_MODEL_CACHE_DIR` /
   `PICTURA_HOST=0.0.0.0` / `PICTURA_PORT` are **pre-seeded** — edit only what needs
   changing (`sudoedit deploy/pictura-mcp.env`; e.g. `PICTURA_MODEL`,
   `PICTURA_CUDA_DEVICE`, `PICTURA_LOG_FILE`)
@@ -239,7 +239,7 @@ journalctl -u pictura-mcp -f
 
 # client config: copy deploy/mcp.remote.json.example and set
 #   url: http://<this-box-ip>:8000/mcp   (port = PICTURA_PORT from the env file)
-#   PICTURE_API_KEY: <PICTURE_API_KEY from deploy/pictura-mcp.env>
+#   PICTURA_API_KEY: <PICTURA_API_KEY from deploy/pictura-mcp.env>
 ```
 
 ```bash
@@ -266,7 +266,7 @@ read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>
 fingerprint of `deploy/pictura-mcp.env.example` in the env file. When the
 template changes, your `deploy/pictura-mcp.env` is left untouched and the
 current rendered template is written to **`deploy/pictura-mcp.env.new`**
-(machine values such as cache / host / port pre-filled, and the `PICTURE_API_KEY`
+(machine values such as cache / host / port pre-filled, and the `PICTURA_API_KEY`
 carried over from your env so merging it keeps clients working). Diff & merge
 what you want, delete the file, then run **`deploy/install-systemd.sh
 --adopt-env`** (a standalone step: records the template and removes the `.new`
@@ -276,7 +276,7 @@ afterwards.
 **B) Current user (user scope, quick):**
 
 ```bash
-cp deploy/pictura-mcp.env.example deploy/pictura-mcp.env   # set PICTURE_API_KEY
+cp deploy/pictura-mcp.env.example deploy/pictura-mcp.env   # set PICTURA_API_KEY
 chmod 600 deploy/pictura-mcp.env
 mkdir -p ~/.config/systemd/user
 sed 's#<PROJECT_ROOT>#/absolute/path/to/this/repo#' \

@@ -22,7 +22,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 | Model switching | ✅ single env var (`PICTURA_MODEL`) | ✅ full model manager | platform catalog | `list_models` | `models` tool |
 | Transports | **stdio + streamable HTTP + SSE** | stdio, `--http`, `--comfyui-url` | stdio / remote API | stdio (Docker available) | stdio |
 | Remote / headless | ✅ + systemd unit | ✅ (LAN/VPS) | hosted | hosted | hosted |
-| Auth on your server | ✅ API key (PICTURE_API_KEY header) | ⚠️ not emphasized (LAN) | platform auth | platform API key | platform API key |
+| Auth on your server | ✅ API key (PICTURA_API_KEY header) | ⚠️ not emphasized (LAN) | platform auth | platform API key | platform API key |
 | Server stateless (no files kept on host) | ✅ always (stdio: inline base64 / http-sse: short-lived download URL, RAM cache) | ⚠️ writes files/workflows | n/a | `local` output mode writes to disk | n/a (URLs on CDN) |
 | Image input size cap | **16 MB body** (~12 MB img) default, tunable via `PICTURA_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
 | Ecosystem / maturity | self-maintained, small | very large (Civitai workflows, plugins) | vendor, large | growing | large (600+ models) |

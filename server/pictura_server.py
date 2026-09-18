@@ -60,7 +60,7 @@ Transports / remote access (CLI):
                                  ~1.6 MB outputs and camera JPEGs. Raise only if
                                  you really need to pass very large images.
     --api-key <key>              require the API key on http/sse: clients send it via
-                                 the PICTURE_API_KEY header
+                                 the PICTURA_API_KEY header
     --log-file <path>            append [pictura-mcp] logs to a file (default: stderr)
 
 Run:
@@ -1626,7 +1626,7 @@ def main() -> int:  # noqa: C901
     parser.add_argument(
         "--api-key",
         default=None,
-        help="require API key on http/sse via PICTURE_API_KEY header (falls back to $PICTURE_API_KEY)",
+        help="require API key on http/sse via PICTURA_API_KEY header (falls back to $PICTURA_API_KEY)",
     )
     parser.add_argument(
         "--log-file",
@@ -1642,7 +1642,7 @@ def main() -> int:  # noqa: C901
             flush=True,
         )
         return 2
-    token = args.api_key or os.environ.get("PICTURE_API_KEY")
+    token = args.api_key or os.environ.get("PICTURA_API_KEY")
     http_port = args.port or int(_env("PICTURA_PORT", "8000") or "8000")
     http_host = args.host or _env("PICTURA_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
@@ -1704,7 +1704,7 @@ def main() -> int:  # noqa: C901
 
 
 def _auth_ok(request, token: str | None) -> bool:
-    """API-key check for MCP requests (PICTURE_API_KEY header).
+    """API-key check for MCP requests (PICTURA_API_KEY header).
 
     token=None (no key configured) allows all requests; /images is a separate
     capability URL (unguessable id + TTL) and uses no key.
