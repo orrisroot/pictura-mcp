@@ -1711,7 +1711,7 @@ def _auth_ok(request, token: str | None) -> bool:
     """
     if not token:
         return True
-    return request.headers.get("picture_api_key") == token
+    return request.headers.get("pictura_api_key") == token
 
 
 def _attach_http_middleware(mcp_app, token: str | None):
