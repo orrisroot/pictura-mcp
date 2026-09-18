@@ -59,14 +59,14 @@ Transports / remote access (CLI):
                                  16 MB body ≈ 12 MB image, ample for typical
                                  ~1.6 MB outputs and camera JPEGs. Raise only if
                                  you really need to pass very large images.
-    --token <token>              require the API key on http/sse: clients send it via
+    --api-key <key>              require the API key on http/sse: clients send it via
                                  the PICTURE_API_KEY header
     --log-file <path>            append [pictura-mcp] logs to a file (default: stderr)
 
 Run:
     ./.venv/bin/python server/pictura_server.py                     # stdio MCP server
     ./.venv/bin/python server/pictura_server.py --transport http \
-        --host 0.0.0.0 --port 8000 --token sekrit               # remote HTTP server
+        --host 0.0.0.0 --port 8000 --api-key sekrit            # remote HTTP server
     ./.venv/bin/python server/pictura_server.py --smoke            # self-test (no MCP)
 """
 
@@ -1136,7 +1136,7 @@ def _finalize_result(image, actual_seed: int, t0: float, prefix: str = "img") ->
 def _request_base(ctx) -> str | None:
     """Externally visible base URL of the current HTTP request.
 
-    Used to build image download URLs when PICTURA_PUBLIC_URL is not set: a
+    Builds image download URLs when PICTURA_PUBLIC_URL is not set: a
     reverse proxy forwards the public Host (and with uvicorn's proxy headers
     the X-Forwarded-Proto / X-Forwarded-Host), so the resulting URL is
     reachable by the client. None for stdio or when no request is available;
@@ -1625,7 +1625,7 @@ def main() -> int:  # noqa: C901
         help="max HTTP request body size in MB for http/sse (default 16)",
     )
     parser.add_argument(
-        "--token",
+        "--api-key",
         default=None,
         help="require API key on http/sse via PICTURE_API_KEY header (falls back to $PICTURE_API_KEY)",
     )
@@ -1643,7 +1643,7 @@ def main() -> int:  # noqa: C901
             flush=True,
         )
         return 2
-    token = args.token or os.environ.get("PICTURE_API_KEY")
+    token = args.api_key or os.environ.get("PICTURE_API_KEY")
     http_port = args.port or int(_env("PICTURA_PORT", "8000") or "8000")
     http_host = args.host or _env("PICTURA_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
