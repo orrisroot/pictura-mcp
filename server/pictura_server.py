@@ -17,9 +17,6 @@ Configuration (environment variables):
     PICTURA_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
     PICTURA_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
     PICTURA_SKIP_PREFETCH=1         skip pre-downloading allowlisted models at startup
-    PICTURA_ALLOW_HOST_PATHS         force whether edit_image may read host file paths:
-                                  auto (default) = allowed on stdio/local, denied over
-                                  http/sse; 0 = always data-URI-only; 1 = always allow
     PICTURA_MAX_CONCURRENT          concurrent rendering slots (default "auto": sized
                                   from measured free VRAM; integer pins the pool;
                                   1 = strictly serial). Each slot is an independent
@@ -36,8 +33,6 @@ URL image return (http/sse only):
                                   (default 600)
     PICTURA_IMAGE_URL_MAX            max cached images (default 64)
     PICTURA_IMAGE_URL_MAX_MB         max total cache bytes (default 512)
-    PICTURA_IMAGE_URL_AUTH           none (default) | token  - also require the API key
-                                  on /images/*
 
 Client-supplied `lora` ids are restricted to a built-in default allowlist
 (override via PICTURA_LORA_ALLOWLIST); URLs/local paths are rejected and weights
@@ -46,10 +41,9 @@ load safetensors-only. ControlNet is exposed as an abstract `control_type`
 from an internal allowlist (PICTURA_CONTROLNET_ALLOWLIST). Allowlisted models are
 pre-downloaded into the cache at service startup.
 
-`edit_image` reads host image paths only on a local stdio run (and when
-PICTURA_ALLOW_HOST_PATHS forces it); over http/sse it accepts only in-memory
-data:image/...;base64,... URIs, so the server never touches the remote host's
-filesystem.
+`edit_image` reads host image paths only on a local stdio run; over http/sse it
+accepts only in-memory data:image/...;base64,... URIs, so the server never
+touches the remote host's filesystem.
 
 Images are never written to disk. On stdio the result is returned inline as
 base64 (ImageContent); over http/sse the result is a short-lived download URL
@@ -195,8 +189,7 @@ _URL_TTL = float(_env("PICTURA_IMAGE_URL_TTL", "600") or 600)
 _URL_MAX = max(1, int(_env("PICTURA_IMAGE_URL_MAX", "64") or 64))
 _URL_MAX_BYTES = max(
     1, int(_env("PICTURA_IMAGE_URL_MAX_MB", "512") or 512)
-) * 1024 * 1024
-_URL_AUTH = (_env("PICTURA_IMAGE_URL_AUTH") or "none").strip().lower()
+)* 1024 * 1024
 # Explicit public base for image URLs. If unset, the base is derived from the
 # incoming request (reverse proxy Host / X-Forwarded-Proto), falling back to
 # the bind address.
@@ -666,20 +659,9 @@ def _ensure_i2i(slot):
 
 
 # Whether edit_image may read server-side file paths / file:// URIs.
-# Default: only when the client is local (stdio) - remote (http/sse) stays
-# data-URI-only (secure default). PICTURA_ALLOW_HOST_PATHS=0|1 forces it either
-# way (set in main() from the transport + override).
+# Fixed policy: allowed only when the client is local (stdio) - remote
+# (http/sse) stays data-URI-only (secure default). Set in main() from transport.
 _ALLOW_HOST_PATHS = False
-
-
-def _resolve_host_paths(transport: str, smoke: bool = False) -> bool:
-    """Decide whether edit_image may read host file paths this run."""
-    override = (_env("PICTURA_ALLOW_HOST_PATHS") or "").strip().lower()
-    if override in ("0", "false", "no", "off"):
-        return False
-    if override in ("1", "true", "yes", "on"):
-        return True
-    return transport == "stdio" or smoke
 
 
 def _load_source_image(image_src: str):
@@ -1682,10 +1664,10 @@ def main() -> int:  # noqa: C901
     else:
         _RETURN_MODE = "inline"
         _URL_BASE = None
-    # edit_image host-path reads: allowed for a local stdio client, denied over
-    # http/sse unless PICTURA_ALLOW_HOST_PATHS forces otherwise.
+    # edit_image host-path reads: fixed policy - allowed for a local stdio
+    # client, denied over http/sse.
     global _ALLOW_HOST_PATHS
-    _ALLOW_HOST_PATHS = _resolve_host_paths(args.transport, args.smoke)
+    _ALLOW_HOST_PATHS = args.transport == "stdio" or args.smoke
     if _ALLOW_HOST_PATHS:
         _log("edit_image: host file paths allowed (local stdio run)")
     else:
@@ -1723,10 +1705,10 @@ def main() -> int:  # noqa: C901
 
 
 def _auth_ok(request, token: str | None) -> bool:
-    """Authorization check used on /mcp and /images.
+    """API-key check for MCP requests (PICTURE_API_KEY header).
 
-    The API key must be sent in the PICTURE_API_KEY header; token=None (no key
-    configured) allows all requests.
+    token=None (no key configured) allows all requests; /images is a separate
+    capability URL (unguessable id + TTL) and uses no key.
     """
     if not token:
         return True
@@ -1741,19 +1723,14 @@ def _attach_http_middleware(mcp_app, token: str | None):
     init) still runs. Wrapping the app in another Starlette app with Mount
     would skip that lifespan and crash with "Task group is not initialized".
 
-    The image id is an unguessable secret, so the URL itself is the capability;
-    PICTURA_IMAGE_URL_AUTH=token additionally requires the API key (header or
-    ?token= query param for simple fetch tools).
+    The image id is an unguessable secret, so the URL itself is the capability
+    (valid for the short cache TTL; no additional auth).
     """
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse, Response
 
     async def _serve_image(request):
         img_id = request.url.path[len("/images/"):]
-        if _URL_AUTH == "token":
-            qtoken = request.query_params.get("token")
-            if not (_auth_ok(request, token) or (qtoken is not None and qtoken == token)):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
         data = _img_cache.get(img_id)
         if data is None:
             return JSONResponse({"error": "image not found or expired"}, status_code=404)

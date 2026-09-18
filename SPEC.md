@@ -69,7 +69,7 @@ Edits an existing image with a prompt (img2img).
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `prompt` | string | — | required |
-| `image` | string | — | required. Source image: local file path / `file://` URI (local stdio run only) or `data:image/...;base64,...` URI (everywhere, portable). Over http/sse only `data:` URIs are accepted — the server reads no host files (`PICTURA_ALLOW_HOST_PATHS` forces it either way) |
+| `image` | string | — | required. Source image: local file path / `file://` URI (local stdio run only) or `data:image/...;base64,...` URI (everywhere, portable). Over http/sse only `data:` URIs are accepted — the server reads no host files |
 | `negative_prompt` | string | `""` | |
 | `strength` | float | 0.6 | 0..1, higher = more change |
 | `width` / `height` | int | 0 | 0 = keep source size; clamped to [256, 1024], multiple of 8 |
@@ -94,8 +94,7 @@ Reports `model`, `device`, `dtype`, `offload`, `weights_gb`, `vram_gb`,
 **All tools return**: over **stdio** an `ImageContent` (base64 PNG, mime
 `image/png`) + a `TextContent` note; over **http/sse** a single `TextContent`
 note containing a short-lived download URL (`http://<base>/images/<id>`, TTL
-`PICTURA_IMAGE_URL_TTL`, default 600 s) plus optionally `?token=<api-key>` in the
-URL when `PICTURA_IMAGE_URL_AUTH=token`. On failure a text error is returned.
+`PICTURA_IMAGE_URL_TTL`, default 600 s). On failure a text error is returned.
 
 ---
 
@@ -188,13 +187,10 @@ python server/pictura_server.py [options]
   server-side file paths / `file://` URIs are rejected outright (a
   `ValueError`), so a remote client cannot point the server at an arbitrary
   host file. A local (stdio) run may read paths because the client is on the
-  same host and already trusted with the filesystem; `PICTURA_ALLOW_HOST_PATHS`
-  forces either behavior explicitly (the tool schema reflects the mode).
+  same host and already trusted with the filesystem.
 - **Image URLs are capability links**: each generated-image URL embeds an
   unguessable id (192-bit random) and expires after `PICTURA_IMAGE_URL_TTL`;
   images are cached in RAM only (never on disk) and vanish with the process.
-  With `PICTURA_IMAGE_URL_AUTH=token` fetching also requires the API key, so a
-  leaked URL alone is not enough.
 - No output-directory control is offered: tools accept no output path and the
   server never persists images.
 
@@ -218,11 +214,9 @@ python server/pictura_server.py [options]
 | `PICTURA_IMAGE_URL_TTL` | `600` | seconds an image download URL stays valid |
 | `PICTURA_IMAGE_URL_MAX` | `64` | max images kept in the in-memory URL cache |
 | `PICTURA_IMAGE_URL_MAX_MB` | `512` | max total bytes of the URL cache |
-| `PICTURA_IMAGE_URL_AUTH` | `none` | `token` = also require the API key (`PICTURE_API_KEY` header or `?token=`) to fetch `/images/*` |
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
 | `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse |
-| `PICTURA_ALLOW_HOST_PATHS` | `auto` | force whether `edit_image` may read host file paths: `auto` (default) = allowed on stdio/local, denied over http/sse; `0` = always data-URI-only; `1` = always allow (operator's risk, token already gates remote) |
 | `PICTURA_MCP_TOKEN` | unset | API key; clients send it in the `PICTURE_API_KEY` header; fallback when `--token` not given |
 | `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 

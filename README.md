@@ -175,7 +175,7 @@ You can also run the server as an independent process that clients reach over
 - **Host files are not read remotely**: over http/sse, `edit_image` accepts
   only `data:` URIs — no server-side file paths / `file://` URIs (secure
   default). Only a **local stdio run** may read host paths (see § Image
-  editing / `PICTURA_ALLOW_HOST_PATHS`).
+  editing).
 - `--max-body-mb <MB>` (default 16) caps the HTTP request body; base64 images
   arrive in the body
 - The server is **stateless**: no image files are written on the server in any
@@ -187,10 +187,9 @@ You can also run the server as an independent process that clients reach over
   default (reverse-proxy friendly), so **`PICTURA_PUBLIC_URL` is usually not
   needed**; set it only to force a specific externally visible base (e.g.
   behind NAT). Troubleshooting knobs: `PICTURA_IMAGE_URL_TTL` (600 s),
-  `PICTURA_IMAGE_URL_MAX` (64), `PICTURA_IMAGE_URL_MAX_MB` (512),
-  `PICTURA_IMAGE_URL_AUTH`, and `PICTURA_FORWARDED_ALLOW_IPS` (uvicorn's
-  forwarded-allow-ips, default `127.0.0.1`) when a reverse proxy sits on
-  another host.
+  `PICTURA_IMAGE_URL_MAX` (64), `PICTURA_IMAGE_URL_MAX_MB` (512), and
+  `PICTURA_FORWARDED_ALLOW_IPS` (uvicorn's forwarded-allow-ips, default
+  `127.0.0.1`) when a reverse proxy sits on another host.
 
 Remote client config (`deploy/mcp.remote.json.example`):
 
@@ -310,7 +309,7 @@ runtime also auto-offloads and retries.
 - **`image`**: a local file path or `file://` URI on a **local stdio run**, or a
   `data:image/...;base64,...` URI (works everywhere — portable across machines).
   Over **http/sse (remote)** the server reads no host files: `data:` URIs only
-  (secure default). Override the default with `PICTURA_ALLOW_HOST_PATHS=0|1`.
+  (secure default).
 - **`strength`** (0..1, default 0.6): higher = larger change
 - **`width`/`height`** (0 = keep source size; clamp ≤1024, multiple of 8)
 
@@ -329,9 +328,8 @@ model copy). `--smoke` also exercises the img2img path.
   CUDA GPU(s) the server uses (`CUDA_VISIBLE_DEVICES`).
 - Log destination: set `PICTURA_LOG_FILE` (or `--log-file <path>`) to append the
   `[pictura-mcp]` log to a file (default: stderr/journald).
-- Host-path image input: `PICTURA_ALLOW_HOST_PATHS=0|1` forces whether
-  `edit_image` may read host file paths (default: allowed on stdio/local,
-  denied over http/sse — see § Image editing).
+- edit_image host-path reads: allowed on a local stdio run, denied over
+  http/sse (see § Image editing).
   Logrotate-ready: the server reopens its log file on `SIGHUP`, and a
   `copytruncate`-based config is provided in `deploy/logrotate.example`.
   **Privacy: user prompts and tool arguments are never written to any log.**
