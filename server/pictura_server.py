@@ -765,7 +765,9 @@ def _apply_loras(pipe, spec: str) -> None:
         names.append(name)
         weights.append(weight)
     pipe.set_adapters(names, adapter_weights=weights)
-    _log(f"LoRA applied: {[(m.rsplit('/', 1)[-1], w) for m, w in entries]}")
+    # Log only a count - LoRA ids are client tool arguments and must stay out
+    # of the logs (privacy guarantee).
+    _log(f"LoRA applied: {len(entries)} adapter(s)")
 
 
 def _resolve_control(ctype: str) -> dict:
@@ -809,12 +811,20 @@ def _preprocess_control(image, ctype: str):
     raise ValueError(f"no preprocessor for control_type '{ctype}'")
 
 
+_PREP_LOCK = threading.Lock()  # serialize shared preprocessor init + inference
 _dpt_processor = None
 _dpt_model = None
 
 
 def _preprocess_depth(image):
     """Depth map (near = white) via DPT on the model cache."""
+    # The preprocessor model is a shared, lazily built global; serialize so
+    # concurrent slots cannot race its init or run CUDA inference at once.
+    with _PREP_LOCK:
+        return _preprocess_depth_locked(image)
+
+
+def _preprocess_depth_locked(image):
     import torch
     from PIL import Image as PILImage
     from transformers import DPTForDepthEstimation, DPTImageProcessor
@@ -870,6 +880,12 @@ _yolo_model = None
 
 def _preprocess_openpose(image):
     """Skeleton / keypoint map via YOLOv8-pose on the model cache."""
+    # Shared lazily-built YOLO model: serialize init + inference across slots.
+    with _PREP_LOCK:
+        return _preprocess_openpose_locked(image)
+
+
+def _preprocess_openpose_locked(image):
     import numpy as np
     from PIL import Image as PILImage
 
@@ -1318,7 +1334,10 @@ def _build_server():
     @server.tool(
         name="server_status",
         title="Server Status",
-        description="Report the loaded image model, device, dtype and VRAM usage.",
+        description=(
+            "Report the loaded image model, device, dtype, VRAM usage, weight "
+            "size, offload state and the number of concurrent render slots."
+        ),
     )
     async def server_status() -> str:
         import asyncio
@@ -1334,6 +1353,8 @@ def _build_server():
             f"model={info.get('model')}\n"
             f"device={info.get('device')}\n"
             f"dtype={info.get('dtype')}\n"
+            f"offload={info.get('offload')}\n"
+            f"weights_gb={info.get('weights_gb')}\n"
             f"vram_gb={info.get('vram_gb')}\n"
             f"concurrency_slots={n_slots}\n"
             f"load_seconds={info.get('load_seconds')}"

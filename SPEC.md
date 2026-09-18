@@ -88,7 +88,7 @@ guidance. **No model identifiers are exposed** (they stay server-side).
 
 ### `server_status`
 Reports `model`, `device`, `dtype`, `offload`, `weights_gb`, `vram_gb`,
-`load_seconds`.
+`concurrency_slots`, `load_seconds`.
 
 **All tools return** `ImageContent` (base64 PNG, mime `image/png`) + a
 `TextContent` note. The note states the suggested client-side filename and that
