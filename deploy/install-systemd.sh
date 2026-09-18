@@ -9,8 +9,9 @@
 #
 # Env handling: when the env template changes, the env file is left untouched
 # and the current rendered template is written to deploy/pictura-mcp.env.new.
-# After diff/merge, re-run with --adopt-env to record the template and drop the
-# artifact (the API key is generated on first install and kept afterwards).
+# After diff/merge, run with --adopt-env: it records the template and removes
+# the .new file, then exits (standalone - no install work).
+# The API key is generated on first install and kept afterwards.
 set -euo pipefail
 
 # Pull the optional --adopt-env flag out before positional parsing.
@@ -29,6 +30,27 @@ UNIT="${4:-/etc/systemd/system/pictura-mcp.service}"
 
 if [[ $EUID -ne 0 ]]; then
   echo "error: run as root" >&2; exit 1
+fi
+
+# --adopt-env is a standalone maintenance step: record the current env template
+# and remove the .new artifact, then exit (no install work is done).
+if [[ $ADOPT -eq 1 ]]; then
+  ENV_FILE="$PROJECT_ROOT/deploy/pictura-mcp.env"
+  TEMPLATE="$PROJECT_ROOT/deploy/pictura-mcp.env.example"
+  NEW_FILE="${ENV_FILE}.new"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "error: $ENV_FILE does not exist" >&2; exit 1
+  fi
+  tpl_sha="$(sha256sum "$TEMPLATE" 2>/dev/null | awk '{print $1}')" || true
+  tpl_sha="${tpl_sha:-unknown}"
+  if grep -q '^# *template-fingerprint:' "$ENV_FILE"; then
+    sed -i "s|^# *template-fingerprint:.*|# template-fingerprint: $tpl_sha|" "$ENV_FILE"
+  else
+    printf '\n# template-fingerprint: %s\n' "$tpl_sha" >> "$ENV_FILE"
+  fi
+  rm -f "$NEW_FILE"
+  echo "adopted the current env template: fingerprint recorded, ${NEW_FILE##*/} removed"
+  exit 0
 fi
 if [[ ! -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
   echo "error: $PROJECT_ROOT/.venv/bin/python not found -" >&2
@@ -72,13 +94,6 @@ write_fingerprint() {  # $1 = sha
     printf '\n# template-fingerprint: %s\n' "$1" >> "$ENV_FILE"
   fi
 }
-# --adopt-env: after merging the .new file, record the template and drop it.
-if [[ $ADOPT -eq 1 ]]; then
-  write_fingerprint "$tpl_sha"
-  rm -f "$NEW_FILE"
-  echo "  adopted the current template (${NEW_FILE##*/} removed, fingerprint recorded)"
-  recorded="$tpl_sha"
-fi
 
 created=0
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -173,31 +188,25 @@ systemctl enable pictura-mcp
 if systemctl is-active --quiet pictura-mcp; then
   echo "NOTE: already running; restart after env edits: systemctl restart pictura-mcp"
 fi
-echo
-echo "Done. NEXT STEPS:"
-echo "  1. review the env file - the API key is already generated (sk-pictura-...) and"
-echo "     the essentials (PICTURA_MODEL_CACHE_DIR / PICTURA_HOST / PICTURA_PORT) are"
-echo "     pre-seeded; edit only what needs changing:"
-echo "        sudoedit $ENV_FILE"
-echo "     If the installer wrote ${ENV_FILE##*/}.new, the template changed; your env"
-echo "     is untouched - diff, merge, then re-run with --adopt-env to record it."
-echo "  2. start the service:"
-echo "        systemctl start pictura-mcp"
 PORT_EFF="$(grep '^PICTURA_PORT=' "$ENV_FILE" | cut -d= -f2-)"
 PORT_EFF="${PORT_EFF:-$PORT}"
-echo "  3. verify - watch the log until 'MCP http server: http://...:${PORT_EFF}/mcp'"
-echo "     and 'Model ready' appear:"
-echo "        journalctl -u pictura-mcp -f"
-echo "  4. point your MCP client at http://<this-box-ip>:${PORT_EFF}/mcp with the"
-echo "     API key (PICTURE_API_KEY env) is set in $ENV_FILE"
-echo "     (template: deploy/mcp.remote.json.example)"
-echo "  5. open the port in your firewall if remote machines must reach the GPU box."
 echo
-echo "More follow-ups:"
-echo "  - logs: journalctl -u pictura-mcp -f   (or PICTURA_LOG_FILE when set)"
-echo "  - TO READ THE LOG FILE AS A NON-ROOT OPERATOR, add them to the log group:"
-echo "        sudo usermod -aG $SERVICE_USER <your-username>   # then re-login"
-echo "    (logrotate recreate uses group $SERVICE_USER - see deploy/logrotate.example)"
-echo "  - MemoryDenyWriteExecute may break torch; remove it from the unit if the service crashes."
-echo "  - env template change: deploy/pictura-mcp.env.new holds the current template;"
-echo "    diff & merge it, then re-run with --adopt-env to record and remove it."
+echo "Done."
+echo
+echo "Next:"
+echo "  1. review  $ENV_FILE          (API key + essentials pre-populated)"
+echo "  2. start   systemctl start pictura-mcp"
+echo "  3. watch   journalctl -u pictura-mcp -f   (until 'Model ready' appears)"
+echo "  4. client  http://<this-box-ip>:${PORT_EFF}/mcp   with the header"
+echo "             PICTURE_API_KEY: <the key in $ENV_FILE>"
+echo "             config template: deploy/mcp.remote.json.example"
+if [[ -f "$NEW_FILE" ]]; then
+echo
+echo "  NOTE: ${NEW_FILE##*/} exists - the env template changed. Review it, merge"
+echo "        what you want, delete it, then run this script with --adopt-env"
+echo "        (standalone: records the template and removes the file)."
+fi
+echo
+echo "Help: logs go to journalctl (or PICTURA_LOG_FILE). If the unit fails at"
+echo "      startup, remove MemoryDenyWriteExecute from the unit (torch conflict)"
+echo "      - see README. Non-root log readers: sudo usermod -aG $SERVICE_USER <user>"

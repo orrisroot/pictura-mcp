@@ -303,7 +303,6 @@ _CONTROL_TYPES: dict[str, dict] = {
     },
 }
 
-# Model-aware default resolution / steps.
 IS_XL = "xl" in MODEL_ID.lower()  # the server requires an SDXL model (checked in main)
 
 # Default resolution / steps (SDXL).

@@ -268,9 +268,10 @@ template changes, your `deploy/pictura-mcp.env` is left untouched and the
 current rendered template is written to **`deploy/pictura-mcp.env.new`**
 (machine values such as cache / host / port pre-filled, and the `PICTURE_API_KEY`
 carried over from your env so merging it keeps clients working). Diff & merge
-what you want, delete the file, then re-run the installer with **`--adopt-env`**
-to record the template and clear the notice. The API key is generated on first
-install and kept afterwards.
+what you want, delete the file, then run **`deploy/install-systemd.sh
+--adopt-env`** (a standalone step: records the template and removes the `.new`
+file, no reinstall). The API key is generated on first install and kept
+afterwards.
 
 **B) Current user (user scope, quick):**
 
