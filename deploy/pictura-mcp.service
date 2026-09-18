@@ -16,13 +16,13 @@ EnvironmentFile=<PROJECT_ROOT>/deploy/pictura-mcp.env
 # Read-write areas for the service user only (ProtectSystem=strict makes the
 # rest of the FS read-only). MCP operation needs only the model cache; the '-'
 # prefix tolerates a missing path. install-systemd.sh creates the cache dir
-# and rewrites this line from deploy/pictura-mcp.env (IMAGE_MODEL_CACHE_DIR +
-# IMAGE_LOG_FILE) — keep them in sync when editing the unit by hand.
+# and rewrites this line from deploy/pictura-mcp.env (PICTURA_MODEL_CACHE_DIR +
+# PICTURA_LOG_FILE) — keep them in sync when editing the unit by hand.
 ReadWritePaths=-<PROJECT_ROOT>/.model-cache
 ExecStart=<PROJECT_ROOT>/.venv/bin/python \
     <PROJECT_ROOT>/server/pictura_server.py \
     --transport http
-# Bind address / TCP port come from IMAGE_HOST / IMAGE_PORT in
+# Bind address / TCP port come from PICTURA_HOST / PICTURA_PORT in
 # deploy/pictura-mcp.env (defaults: 0.0.0.0 / 8000).
 
 # ---- hardening ------------------------------------------------------------

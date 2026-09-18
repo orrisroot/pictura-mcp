@@ -19,12 +19,12 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 | ControlNet / LoRA / custom checkpoints | ⚠️ code-level (not exposed as tools) | ✅ (first-class, big ecosystem) | some (platform models) | ✅ model catalog | ✅ 600+ models |
 | Video / audio / 3D | ❌ | ✅ | ✅ (platform) | ✅ | ✅ |
 | Workflow authoring / graph editing | ❌ | ✅ (node workflows, natural language) | ❌ | ❌ | ❌ |
-| Model switching | ✅ single env var (`IMAGE_MODEL`) | ✅ full model manager | platform catalog | `list_models` | `models` tool |
+| Model switching | ✅ single env var (`PICTURA_MODEL`) | ✅ full model manager | platform catalog | `list_models` | `models` tool |
 | Transports | **stdio + streamable HTTP + SSE** | stdio, `--http`, `--comfyui-url` | stdio / remote API | stdio (Docker available) | stdio |
 | Remote / headless | ✅ + systemd unit | ✅ (LAN/VPS) | hosted | hosted | hosted |
 | Auth on your server | ✅ bearer token | ⚠️ not emphasized (LAN) | platform auth | platform API key | platform API key |
-| Server stateless (no files kept on host) | ✅ always, identical local/remote | ⚠️ writes files/workflows | n/a | `local` output mode writes to disk | n/a (URLs on CDN) |
-| Image input size cap | **16 MB body** (~12 MB img) default, tunable via `IMAGE_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
+| Server stateless (no files kept on host) | ✅ always (stdio: inline base64 / http-sse: short-lived download URL, RAM cache) | ⚠️ writes files/workflows | n/a | `local` output mode writes to disk | n/a (URLs on CDN) |
+| Image input size cap | **16 MB body** (~12 MB img) default, tunable via `PICTURA_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
 | Ecosystem / maturity | self-maintained, small | very large (Civitai workflows, plugins) | vendor, large | growing | large (600+ models) |
 
 ## 2. Where this project wins
@@ -41,7 +41,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
   auto-retry are built in and default-on for SDXL at 1024 px.
 - **Decent image input**: 16 MB request body by default (≈12 MB image) — well
   above Claude's ≈5 MB per-image inline limit and headroom over the ~1.6 MB
-  outputs; raise `--max-body-mb` / `IMAGE_MAX_BODY_MB` only if you really
+  outputs; raise `--max-body-mb` / `PICTURA_MAX_BODY_MB` only if you really
   pass very large sources.
 
 ## 3. Where established MCPs win
@@ -58,13 +58,8 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 
 If the comparison favors gaps we care about, the cheapest wins to add here:
 
-1. **ControlNet + LoRA support** as tools (diffusers natively supports both) →
-   closes most of the ComfyUI gap for typical use.
-2. **`http(s)://` image input** in `edit_image` (fetch server-side) → mirrors
+1. **`http(s)://` image input** in `edit_image` (fetch server-side) → mirrors
    cloud-MCP workflows.
-3. **Batch / multi-seed generate** tool.
-4. **ControlNet & LoRA** are now implemented: `lora` (ids) plus an abstract
-   `control_type` on `edit_image` (server-side preprocessing + hidden model) —
-   closing most of the ComfyUI gap for typical use.
-5. **Video gen** would require a different model family (e.g. Wan/LTX) — larger
+2. **Batch / multi-seed generate** tool.
+3. **Video gen** would require a different model family (e.g. Wan/LTX) — larger
    scope; not recommended for a low-VRAM card.

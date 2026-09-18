@@ -4,50 +4,60 @@ Image generation MCP server (MCP 2.x).
 Runs an SDXL (Stable Diffusion XL) pipeline (Hugging Face `diffusers`) and
 exposes it as MCP tools over stdio. Uses the local GPU (CUDA) when available.
 SDXL is the supported model family: any SDXL checkpoint (including base or
-finetune variants) can be selected via `IMAGE_MODEL`.
+finetune variants) can be selected via `PICTURA_MODEL`.
 
 Configuration (environment variables):
-    IMAGE_MODEL       Hugging Face model id, SDXL family
+    PICTURA_MODEL       Hugging Face model id, SDXL family
                       (default: stabilityai/stable-diffusion-xl-base-1.0;
                       any SDXL checkpoint/finetune id works)
-    IMAGE_VAE         Optional VAE model id to attach (e.g. for SDXL fp16 fixes)
-    IMAGE_DEVICE      cuda | cpu (default: cuda if available else cpu)
-    IMAGE_CUDA_DEVICE          restrict CUDA GPUs, e.g. "0" or "0,1" (=> CUDA_VISIBLE_DEVICES)
-    IMAGE_MODEL_CACHE_DIR        model download/cache directory (default: HF cache)
-    IMAGE_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
-    IMAGE_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
-    IMAGE_SKIP_PREFETCH=1         skip pre-downloading allowlisted models at startup
-    IMAGE_ALLOW_HOST_PATHS         force whether edit_image may read host file paths:
+    PICTURA_VAE         Optional VAE model id to attach (e.g. for SDXL fp16 fixes)
+    PICTURA_DEVICE      cuda | cpu (default: cuda if available else cpu)
+    PICTURA_CUDA_DEVICE          restrict CUDA GPUs, e.g. "0" or "0,1" (=> CUDA_VISIBLE_DEVICES)
+    PICTURA_MODEL_CACHE_DIR        model download/cache directory (default: HF cache)
+    PICTURA_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
+    PICTURA_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
+    PICTURA_SKIP_PREFETCH=1         skip pre-downloading allowlisted models at startup
+    PICTURA_ALLOW_HOST_PATHS         force whether edit_image may read host file paths:
                                   auto (default) = allowed on stdio/local, denied over
                                   http/sse; 0 = always data-URI-only; 1 = always allow
-    IMAGE_MAX_CONCURRENT          concurrent rendering slots (default "auto": sized
+    PICTURA_MAX_CONCURRENT          concurrent rendering slots (default "auto": sized
                                   from measured free VRAM; integer pins the pool;
                                   1 = strictly serial). Each slot is an independent
                                   pipeline instance (own LoRA/sched/offload state).
-    IMAGE_HOST                    bind address for http/sse (default 127.0.0.1)
-    IMAGE_PORT                    TCP port for http/sse (default 8000)
-    IMAGE_LOG_FILE                append [pictura-mcp] logs to this file (default: stderr)
+    PICTURA_HOST                    bind address for http/sse (default 127.0.0.1)
+    PICTURA_PORT                    TCP port for http/sse (default 8000)
+    PICTURA_LOG_FILE                append [pictura-mcp] logs to a file (default: stderr)
+
+URL image return (http/sse only):
+    PICTURA_PUBLIC_URL              externally visible base URL (required for 0.0.0.0)
+    PICTURA_IMAGE_URL_TTL            short-term cache lifetime for image URLs, seconds
+                                  (default 600)
+    PICTURA_IMAGE_URL_MAX            max cached images (default 64)
+    PICTURA_IMAGE_URL_MAX_MB         max total cache bytes (default 512)
+    PICTURA_IMAGE_URL_AUTH           none (default) | token  - also require the MCP
+                                  bearer token on /images/*
 
 Client-supplied `lora` ids are restricted to a built-in default allowlist
-(override via IMAGE_LORA_ALLOWLIST); URLs/local paths are rejected and weights
+(override via PICTURA_LORA_ALLOWLIST); URLs/local paths are rejected and weights
 load safetensors-only. ControlNet is exposed as an abstract `control_type`
 (e.g. 'canny'); the backing model/preprocessor stay server-side and are picked
-from an internal allowlist (IMAGE_CONTROLNET_ALLOWLIST). Allowlisted models are
+from an internal allowlist (PICTURA_CONTROLNET_ALLOWLIST). Allowlisted models are
 pre-downloaded into the cache at service startup.
 
 `edit_image` reads host image paths only on a local stdio run (and when
-IMAGE_ALLOW_HOST_PATHS forces it); over http/sse it accepts only in-memory
+PICTURA_ALLOW_HOST_PATHS forces it); over http/sse it accepts only in-memory
 data:image/...;base64,... URIs, so the server never touches the remote host's
 filesystem.
 
-Generated images are never written to disk on the server: they are always
-returned inline as base64 and the client (e.g. the coding agent) is responsible
-for saving them — local and remote operation is identical.
+Images are never written to disk. On stdio the result is returned inline as
+base64 (ImageContent); over http/sse the result is a short-lived download URL
+(system the image sits in an in-memory cache, TTL-bound, and the client saves
+it — server and client may not share a filesystem).
 
 Transports / remote access (CLI):
     --transport stdio|http|sse   default stdio (spawned by the MCP client)
-    --host <host>                bind address for http/sse (default: $IMAGE_HOST or 127.0.0.1)
-    --port <port>                TCP port for http/sse (default: $IMAGE_PORT or 8000)
+    --host <host>                bind address for http/sse (default: $PICTURA_HOST or 127.0.0.1)
+    --port <port>                TCP port for http/sse (default: $PICTURA_PORT or 8000)
     --max-body-mb <MB>           max HTTP request body for http/sse (default 16)
                                  Img2img base64 image input is sent in the body;
                                  16 MB body ≈ 12 MB image, ample for typical
@@ -70,6 +80,7 @@ import io
 import logging
 import os
 import random
+import secrets
 import sys
 import threading
 import time
@@ -91,7 +102,7 @@ for _name in ("httpx", "huggingface_hub", "mcp", "uvicorn", "starlette", "asynci
 # See README/SPEC for the privacy guarantee.
 
 # ---- log destination ------------------------------------------------------
-# IMAGE_LOG_FILE / --log-file redirect the [pictura-mcp] log to a file (append),
+# PICTURA_LOG_FILE / --log-file redirect the [pictura-mcp] log to a file (append),
 # reopened on SIGHUP so logrotate (postrotate kill -HUP) keeps working.
 _LOG_FH = None
 _LOG_PATH: str | None = None
@@ -138,8 +149,13 @@ def _log(msg: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
-if os.environ.get("IMAGE_LOG_FILE"):
-    _set_log_file(os.environ["IMAGE_LOG_FILE"])
+def _env(key: str, default: str | None = None) -> str | None:
+    """Read an environment variable (PICTURA_* namespace)."""
+    return os.environ.get(key, default)
+
+
+if _env("PICTURA_LOG_FILE"):
+    _set_log_file(_env("PICTURA_LOG_FILE"))
 
 # Reduce CUDA allocator fragmentation (helps under CPU offload / ControlNet).
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -148,25 +164,111 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # Config
 # --------------------------------------------------------------------------
 
-MODEL_ID = os.environ.get("IMAGE_MODEL", "stabilityai/stable-diffusion-xl-base-1.0")
-VAE_ID: str | None = os.environ.get("IMAGE_VAE") or None
-DEVICE = os.environ.get("IMAGE_DEVICE", "cuda").lower()
+MODEL_ID = _env("PICTURA_MODEL", "stabilityai/stable-diffusion-xl-base-1.0")
+VAE_ID: str | None = _env("PICTURA_VAE") or None
+DEVICE = (_env("PICTURA_DEVICE", "cuda") or "cuda").lower()
 
-# Restrict which CUDA GPU(s) are used, e.g. IMAGE_CUDA_DEVICE=0 or 0,1.
+# Restrict which CUDA GPU(s) are used, e.g. PICTURA_CUDA_DEVICE=0 or 0,1.
 # Applied via the standard CUDA_VISIBLE_DEVICES before torch initializes CUDA.
-_cuda_visible = os.environ.get("IMAGE_CUDA_DEVICE")
+_cuda_visible = _env("PICTURA_CUDA_DEVICE")
 if _cuda_visible:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda_visible
     _log(f"CUDA_VISIBLE_DEVICES -> {_cuda_visible}")
 
 # Optional model download/cache directory (overrides the default HF cache).
-CACHE_DIR: str | None = os.environ.get("IMAGE_MODEL_CACHE_DIR") or None
+CACHE_DIR: str | None = _env("PICTURA_MODEL_CACHE_DIR") or None
 if CACHE_DIR:
     os.environ.setdefault("HF_HOME", CACHE_DIR)
     os.environ.setdefault("HF_HUB_CACHE", str(Path(CACHE_DIR) / "hub"))
 
+# --------------------------------------------------------------------------
+# URL image return + short-term in-memory cache (http/sse only)
+# --------------------------------------------------------------------------
+# Over http/sse each generated image is stored in an in-memory cache for a
+# short TTL and the tool result returns an unguessable download URL (server
+# and client may not share a filesystem). Images are never written to disk:
+# the cache lives only in RAM and vanishes with the process.
+_URL_TTL = float(_env("PICTURA_IMAGE_URL_TTL", "600") or 600)
+_URL_MAX = max(1, int(_env("PICTURA_IMAGE_URL_MAX", "64") or 64))
+_URL_MAX_BYTES = max(
+    1, int(_env("PICTURA_IMAGE_URL_MAX_MB", "512") or 512)
+) * 1024 * 1024
+_URL_AUTH = (_env("PICTURA_IMAGE_URL_AUTH") or "none").strip().lower()
+
+
+class _ImageCache:
+    """In-memory short-term store for images served back over HTTP.
+
+    Thread-safe; evicts expired entries lazily and enforces the entry count /
+    total-bytes caps (oldest first) so a burst of generations cannot exhaust
+    RAM. Ids are 192-bit unguessable secrets (the URL itself is the ticket).
+    """
+
+    def __init__(self, max_entries: int, max_total_bytes: int, ttl: float):
+        self._max = max_entries
+        self._max_bytes = max_total_bytes
+        self._ttl = ttl
+        self._store: dict[str, tuple[float, bytes]] = {}
+        self._lock = threading.Lock()
+
+    def put(self, data: bytes) -> str | None:
+        """Cache image bytes; return an unguessable id (None if it does not fit)."""
+        with self._lock:
+            now = time.monotonic()
+            for k, (exp, _) in list(self._store.items()):
+                if exp <= now:
+                    del self._store[k]
+            while self._store and (
+                len(self._store) >= self._max
+                or sum(len(v) for _, v in self._store.values()) + len(data) > self._max_bytes
+            ):
+                # oldest insertion first (dict preserves insertion order)
+                self._store.pop(next(iter(self._store)))
+            img_id = secrets.token_urlsafe(24)
+            self._store[img_id] = (now + self._ttl, data)
+            return img_id
+
+    def get(self, img_id: str) -> bytes | None:
+        """Return cached bytes for an id, or None when missing/expired."""
+        with self._lock:
+            e = self._store.get(img_id)
+            if e is None:
+                return None
+            exp, data = e
+            if exp <= time.monotonic():
+                del self._store[img_id]
+                return None
+            return data
+
+    @property
+    def ttl(self) -> float:
+        return self._ttl
+
+
+_img_cache = _ImageCache(_URL_MAX, _URL_MAX_BYTES, _URL_TTL)
+# Image return mode. "url": tool result is a short-lived download URL (http/sse
+# with a resolvable public base); "inline": result is the base64 ImageContent
+# (stdio, or http without a usable public URL). Set in main() from the transport.
+_RETURN_MODE = "inline"
+_URL_BASE: str | None = None
+
+
+def _resolve_public_base(host: str, port: int) -> str | None:
+    """The base URL clients use to fetch image URLs (http/sse mode).
+
+    PICTURA_PUBLIC_URL wins (handles NAT / reverse proxy). When the server
+    binds 0.0.0.0 the externally visible address is unknown, so no URL can be
+    built - set PICTURA_PUBLIC_URL for URL-only returns.
+    """
+    configured = (_env("PICTURA_PUBLIC_URL") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    if host in ("0.0.0.0", "::", ""):
+        return None
+    return f"http://{host}:{port}"
+
 # Default allowlists for client-supplied LoRA / ControlNet ids.
-# Override with IMAGE_LORA_ALLOWLIST / IMAGE_CONTROLNET_ALLOWLIST
+# Override with PICTURA_LORA_ALLOWLIST / PICTURA_CONTROLNET_ALLOWLIST
 # (comma-separated; "*" = allow any bare 'org/repo' id). ControlNet ids are
 # internal (hidden from clients) - clients only see abstract control types.
 DEFAULT_LORA_ALLOWLIST = ["nerijs/pixel-art-xl", "CiroN2022/toy-face"]
@@ -249,13 +351,13 @@ class _Slot:
 
 def _compute_slots(info: dict) -> int:
     """Decide the pool size from measured free VRAM (or honor
-    IMAGE_MAX_CONCURRENT: an integer pins the pool size)."""
-    raw = (os.environ.get("IMAGE_MAX_CONCURRENT") or "auto").strip().lower()
+    PICTURA_MAX_CONCURRENT: an integer pins the pool size)."""
+    raw = (_env("PICTURA_MAX_CONCURRENT") or "auto").strip().lower()
     if raw and raw != "auto":
         try:
             return max(1, int(raw))
         except ValueError:
-            _log(f"IMAGE_MAX_CONCURRENT={raw!r} ignored (not an int); using auto")
+            _log(f"PICTURA_MAX_CONCURRENT={raw!r} ignored (not an int); using auto")
     if info.get("device") != "cuda" or info.get("vram_gb", 0) <= 0:
         return 1  # CPU: parallel instances only double RAM without real speedup
     try:
@@ -340,7 +442,7 @@ def _build_txt(slot):
 
     if not IS_XL:
         raise ValueError(
-            f"IMAGE_MODEL={MODEL_ID!r} is not an SDXL model: this server "
+            f"PICTURA_MODEL={MODEL_ID!r} is not an SDXL model: this server "
             "supports the SDXL family only"
         )
 
@@ -559,14 +661,14 @@ def _ensure_i2i(slot):
 
 # Whether edit_image may read server-side file paths / file:// URIs.
 # Default: only when the client is local (stdio) - remote (http/sse) stays
-# data-URI-only (secure default). IMAGE_ALLOW_HOST_PATHS=0|1 forces it either
+# data-URI-only (secure default). PICTURA_ALLOW_HOST_PATHS=0|1 forces it either
 # way (set in main() from the transport + override).
 _ALLOW_HOST_PATHS = False
 
 
 def _resolve_host_paths(transport: str, smoke: bool = False) -> bool:
     """Decide whether edit_image may read host file paths this run."""
-    override = (os.environ.get("IMAGE_ALLOW_HOST_PATHS") or "").strip().lower()
+    override = (_env("PICTURA_ALLOW_HOST_PATHS") or "").strip().lower()
     if override in ("0", "false", "no", "off"):
         return False
     if override in ("1", "true", "yes", "on"):
@@ -657,7 +759,7 @@ _REPO_ID_RE = _re.compile(
 def _allowlist(env: str, default) -> set | None:
     """Resolve an allowlist: env override, else the built-in default.
     "*" disables the allowlist (any bare 'org/repo' id passes syntax check)."""
-    raw = os.environ.get(env, "").strip()
+    raw = (_env(env) or "").strip()
     if raw == "*":
         return None
     if raw:
@@ -699,7 +801,7 @@ def _prefetch_allowlisted() -> None:
     """
     from huggingface_hub import snapshot_download
 
-    ids = list(_allowlist("IMAGE_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST) or DEFAULT_LORA_ALLOWLIST)
+    ids = list(_allowlist("PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST) or DEFAULT_LORA_ALLOWLIST)
     ids += [info["model"] for info in _CONTROL_TYPES.values() if info.get("supported")]
     for mid in dict.fromkeys(ids):
         _log(f"prefetching {mid} ...")
@@ -758,7 +860,7 @@ def _apply_loras(pipe, spec: str) -> None:
     names, weights = [], []
     for i, (mid, weight) in enumerate(entries):
         name = f"lora{i}"
-        _check_model_id("LoRA", mid, "IMAGE_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
+        _check_model_id("LoRA", mid, "PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
         pipe.load_lora_weights(
             mid, adapter_name=name, use_safetensors=True, cache_dir=CACHE_DIR
         )
@@ -784,7 +886,7 @@ def _resolve_control(ctype: str) -> dict:
             f"control_type '{ctype}' is not yet supported by the installed preprocessor"
         )
     _check_model_id(
-        "ControlNet", info["model"], "IMAGE_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST
+        "ControlNet", info["model"], "PICTURA_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST
     )
     return info
 
@@ -926,7 +1028,7 @@ def _build_cn(slot, model_id: str):
     device = DEVICE if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
-    _check_model_id("ControlNet", model_id, "IMAGE_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST)
+    _check_model_id("ControlNet", model_id, "PICTURA_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST)
     _log(f"Loading ControlNet model {model_id} (slot {_slots.index(slot)}) ...")
     cn_model = ControlNetModel.from_pretrained(
         model_id, dtype=dtype, use_safetensors=True, cache_dir=CACHE_DIR
@@ -1031,16 +1133,56 @@ def _image2image(
 
 
 def _finalize_result(image, actual_seed: int, t0: float, prefix: str = "img") -> tuple:
-    """Encode a generated image inline. Returns (b64, elapsed_seconds, name).
+    """Encode a generated image. Returns (png_bytes, b64, elapsed_seconds, name).
 
-    The server is stateless: nothing is written to disk (identical in local and
-    remote modes); the client saves the returned base64 where it wants.
+    Stateless: nothing is written to disk. The client saves the image wherever it
+    wants (inline base64 in stdio mode, or a download URL over http/sse).
     """
     buf = io.BytesIO()
     image.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    data = buf.getvalue()
+    b64 = base64.b64encode(data).decode("ascii")
     name = f"{prefix}_{int(time.time())}_{actual_seed}.png"
-    return b64, round(time.time() - t0, 1), name
+    return data, b64, round(time.time() - t0, 1), name
+
+
+def _image_result(
+    png_bytes: bytes,
+    name: str,
+    actual_seed: int,
+    elapsed: float,
+    kind: str = "image",
+):
+    """Build the tool result for a generated image.
+
+    "url" mode (http/sse): a TextContent note with a short-lived download URL,
+    no inline bytes - the client fetches the image and saves it (server and
+    client may not share a filesystem). "inline" mode (stdio / fallback): the
+    base64 ImageContent plus a note; the client decodes and saves.
+    """
+    if _RETURN_MODE == "url" and _URL_BASE:
+        img_id = _img_cache.put(png_bytes)
+        if img_id:
+            url = f"{_URL_BASE}/images/{img_id}"
+            note = (
+                f"Success. Download and save the {kind} as {name} (the URL is "
+                f"available for ~{_img_cache.ttl:.0f}s):\n"
+                f"  GET {url}\n"
+                f"  e.g. curl -sSf {url} -o {name}\n"
+                f"seed={actual_seed}, {elapsed}s"
+            )
+            return [TextContent(type="text", text=note)]
+    b64 = base64.b64encode(png_bytes).decode("ascii")
+    note = (
+        f"Success. The {kind} {name} is attached to this result as base64 "
+        f"(image content block, mimeType image/png). If you cannot view image "
+        f"content, write the base64 to a file and open it. "
+        f"seed={actual_seed}, {elapsed}s"
+    )
+    return [
+        ImageContent(type="image", data=b64, mimeType="image/png"),
+        TextContent(type="text", text=note),
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -1055,19 +1197,17 @@ def _finalize_result(image, actual_seed: int, t0: float, prefix: str = "img") ->
 _EDIT_IMAGE_DESC_LOCAL = (
     "Transform an existing image using a text prompt (img2img). Pass the "
     "source as a local file path (server host), a file:// URI, or a "
-    "data:image/...;base64,... URI. Returns the edited image inline as "
-    "base64 PNG (ImageContent) - nothing is written to the server disk. "
-    "To see or verify it, decode the returned base64 (data field of the "
-    "first content block) into a local file and open it."
+    "data:image/...;base64,... URI. In stdio mode the result is the edited "
+    "image inline as base64 PNG (ImageContent); over http/sse the result note "
+    "contains a short-lived download URL - the client fetches and saves it. "
+    "Nothing is written to the server disk."
 )
 _EDIT_IMAGE_DESC_REMOTE = (
     "Transform an existing image using a text prompt (img2img). Pass the "
     "source as a data:image/...;base64,... URI (server-side file paths "
     "and file:// URIs are NOT accepted - the server never reads host "
-    "files over http/sse). Returns the edited image inline as base64 PNG "
-    "(ImageContent) - nothing is written to the server disk. "
-    "To see or verify it, decode the returned base64 (data field of the "
-    "first content block) into a local file and open it."
+    "files over http/sse). The result note contains a short-lived download "
+    "URL - the client fetches and saves it. Nothing is written to disk."
 )
 _IMG_FIELD_DESC_LOCAL = (
     "Source image: a local file path (server host), a file:// URI, or a "
@@ -1100,11 +1240,10 @@ def _build_server():
         title="Generate Image",
         description=(
             "Generate an image from a text prompt using the local SDXL "
-            "model. Returns the generated image inline as base64 PNG "
-            "(ImageContent) - nothing is written on the server. To actually "
-            "see or verify the image, decode the returned base64 (data field "
-            "of the first content block, mimeType image/png) into a local file "
-            "and open it with your file tools."
+            "model. In stdio mode the result is the image inline as base64 PNG "
+            "(ImageContent); over http/sse the result note contains a short-lived "
+            "download URL for the client to fetch and save. Nothing is written "
+            "to the server disk."
         ),
     )
     async def generate_image(
@@ -1193,17 +1332,8 @@ def _build_server():
                 TextContent(type="text", text=f"image generation failed: {e}"),
             ]
 
-        b64, elapsed, name = _finalize_result(image, actual_seed, t0, prefix="img")
-        note = (
-            f"Success. The PNG image {name} is attached to this result as "
-            f"base64 (image content block, mimeType image/png). If you cannot "
-            f"view image content, write the base64 to a file and open it. "
-            f"seed={actual_seed}, {elapsed}s"
-        )
-        return [
-            ImageContent(type="image", data=b64, mimeType="image/png"),
-            TextContent(type="text", text=note),
-        ]
+        data, _b64, elapsed, name = _finalize_result(image, actual_seed, t0, prefix="img")
+        return _image_result(data, name, actual_seed, elapsed, kind="image")
 
     @server.tool(
         name="edit_image",
@@ -1319,17 +1449,8 @@ def _build_server():
                 TextContent(type="text", text=f"image edit failed: {e}"),
             ]
 
-        b64, elapsed, name = _finalize_result(edited, actual_seed, t0, prefix="img2img")
-        note = (
-            f"Success. The edited PNG is attached to this result as base64 "
-            f"(image content block) - if you cannot view it, decode it to a file "
-            f"(e.g. {name}) and open that. "
-            f"seed={actual_seed}, strength={strength}, {elapsed}s"
-        )
-        return [
-            ImageContent(type="image", data=b64, mimeType="image/png"),
-            TextContent(type="text", text=note),
-        ]
+        data, _b64, elapsed, name = _finalize_result(edited, actual_seed, t0, prefix="img2img")
+        return _image_result(data, name, actual_seed, elapsed, kind="edited image")
 
     @server.tool(
         name="server_status",
@@ -1369,7 +1490,7 @@ def _build_server():
         ),
     )
     async def list_loras() -> str:
-        lora_ids = _allowlist("IMAGE_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
+        lora_ids = _allowlist("PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
         shown = ", ".join(sorted(lora_ids)) if lora_ids else "(any 'org/repo' - allowlist disabled)"
         return (
             "LoRA ids - pass to 'lora' as 'org/repo:weight' (weight defaults to 1.0):\n"
@@ -1474,17 +1595,17 @@ def main() -> int:  # noqa: C901
         help="MCP transport (default: stdio)",
     )
     parser.add_argument("--host", default=None, help="bind address for http/sse"
-                        " (default: $IMAGE_HOST or 127.0.0.1)")
+                        " (default: $PICTURA_HOST or 127.0.0.1)")
     parser.add_argument(
         "--port",
         type=int,
         default=None,
-        help="TCP port for http/sse (default: $IMAGE_PORT or 8000)",
+        help="TCP port for http/sse (default: $PICTURA_PORT or 8000)",
     )
     parser.add_argument(
         "--max-body-mb",
         type=int,
-        default=int(os.environ.get("IMAGE_MAX_BODY_MB", "16")),
+        default=int(_env("PICTURA_MAX_BODY_MB", "16") or "16"),
         help="max HTTP request body size in MB for http/sse (default 16)",
     )
     parser.add_argument(
@@ -1494,24 +1615,41 @@ def main() -> int:  # noqa: C901
     )
     parser.add_argument(
         "--log-file",
-        default=os.environ.get("IMAGE_LOG_FILE"),
+        default=_env("PICTURA_LOG_FILE"),
         help="append [pictura-mcp] logs to a file (default: stderr / journald)",
     )
     args = parser.parse_args()
     if not IS_XL:
         print(
-            f"[pictura-mcp] IMAGE_MODEL={MODEL_ID!r} is not an SDXL-family "
+            f"[pictura-mcp] PICTURA_MODEL={MODEL_ID!r} is not an SDXL-family "
             "checkpoint (model id must contain 'xl')",
             file=sys.stderr,
             flush=True,
         )
         return 2
     token = args.token or os.environ.get("PICTURA_MCP_TOKEN")
-    http_port = args.port or int(os.environ.get("IMAGE_PORT", "8000"))
-    http_host = args.host or os.environ.get("IMAGE_HOST", "127.0.0.1")
+    http_port = args.port or int(_env("PICTURA_PORT", "8000") or "8000")
+    http_host = args.host or _env("PICTURA_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
+    # Image return mode: http/sse with a resolvable public base -> short-lived
+    # download URLs; otherwise (stdio, or 0.0.0.0 without PICTURA_PUBLIC_URL)
+    # -> inline base64.
+    global _RETURN_MODE, _URL_BASE
+    if args.transport in ("http", "sse"):
+        _URL_BASE = _resolve_public_base(http_host, http_port)
+        _RETURN_MODE = "url" if _URL_BASE else "inline"
+        if not _URL_BASE:
+            _log(
+                "WARNING: cannot build image URLs (host=0.0.0.0 and PICTURA_PUBLIC_URL "
+                "not set) - falling back to inline images; set PICTURA_PUBLIC_URL to "
+                "enable URL-only returns"
+            )
+        _log(f"image return mode: {_RETURN_MODE}" + (f" (base {_URL_BASE})" if _URL_BASE else ""))
+    else:
+        _RETURN_MODE = "inline"
+        _URL_BASE = None
     # edit_image host-path reads: allowed for a local stdio client, denied over
-    # http/sse unless IMAGE_ALLOW_HOST_PATHS forces otherwise.
+    # http/sse unless PICTURA_ALLOW_HOST_PATHS forces otherwise.
     global _ALLOW_HOST_PATHS
     _ALLOW_HOST_PATHS = _resolve_host_paths(args.transport, args.smoke)
     if _ALLOW_HOST_PATHS:
@@ -1531,7 +1669,7 @@ def main() -> int:  # noqa: C901
 
     server = _build_server()
     # Warm the model cache: pre-download allowlisted LoRA / ControlNet repos.
-    if not os.environ.get("IMAGE_SKIP_PREFETCH") == "1":
+    if not _env("PICTURA_SKIP_PREFETCH") == "1":
         _prefetch_allowlisted()
     try:
         if args.transport == "stdio":
@@ -1550,6 +1688,37 @@ def main() -> int:  # noqa: C901
     return 0
 
 
+def _wrap_http_app(mcp_app, token: str | None):
+    """Wrap an MCP Starlette app with GET /images/{img_id} (short-term cache).
+
+    The image id is an unguessable secret, so the URL itself is the capability;
+    PICTURA_IMAGE_URL_AUTH=token additionally requires the MCP bearer token
+    (header or ?token= query param for simple fetch tools).
+    """
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Mount, Route
+
+    async def _serve_image(request):
+        img_id = request.path_params["img_id"]
+        if _URL_AUTH == "token":
+            auth_ok = request.headers.get("authorization", "") == f"Bearer {token}"
+            auth_ok = auth_ok or request.query_params.get("token") == token
+            if not auth_ok:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+        data = _img_cache.get(img_id)
+        if data is None:
+            return JSONResponse({"error": "image not found or expired"}, status_code=404)
+        return Response(content=data, media_type="image/png")
+
+    return Starlette(
+        routes=[
+            Route("/images/{img_id}", _serve_image, methods=["GET"]),
+            Mount("/", app=mcp_app),
+        ]
+    )
+
+
 def _run_http_server(
     server,
     transport: str,
@@ -1561,15 +1730,15 @@ def _run_http_server(
     """Serve the MCP server over HTTP(S) so remote clients can connect."""
     import uvicorn
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse, Response
+    from starlette.responses import JSONResponse
 
     if transport == "sse":
-        app = server.sse_app(
+        mcp_app = server.sse_app(
             host=host, max_request_body_size=max_body_bytes
         )
         path = "/sse"
     else:
-        app = server.streamable_http_app(
+        mcp_app = server.streamable_http_app(
             host=host, json_response=True, max_request_body_size=max_body_bytes
         )
         path = "/mcp"
@@ -1581,7 +1750,7 @@ def _run_http_server(
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await call_next(request)
 
-        app.add_middleware(BaseHTTPMiddleware, dispatch=_require_token)
+        mcp_app.add_middleware(BaseHTTPMiddleware, dispatch=_require_token)
         _log(
             f"MCP {transport} server: http://{host}:{port}{path} "
             f"(auth: Bearer token, max body {max_body_bytes // (1024 * 1024)} MB)"
@@ -1592,7 +1761,7 @@ def _run_http_server(
             f"(NO auth - only for trusted LAN, max body {max_body_bytes // (1024 * 1024)} MB)"
         )
 
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(_wrap_http_app(mcp_app, token), host=host, port=port, log_level="warning")
     return 0
 
 

@@ -31,12 +31,22 @@ as `mcp__generate_image`). The canonical names are:
 
 ## Saving images (important)
 
-The server is stateless: every tool returns the image as inline base64 and
-**nothing is written to any disk**. You (the agent) are responsible for saving:
+The server is stateless: **nothing is written to any disk**. How the image
+arrives depends on the transport you are connected over (the result note says
+which):
 
-1. Capture the returned image data.
-2. Write it to a sensible path (e.g. `./outputs/YYYYMMDD_prompt.png`); create the directory first if needed.
-3. Report the saved path to the user. If you cannot save, tell the user the image is only available inline.
+- **stdio (local)**: the image is returned inline as base64 `ImageContent`
+  (data field). Capture it, decode it into a PNG, and write it to a sensible
+  path (e.g. `./outputs/YYYYMMDD_prompt.png`; create the directory first).
+- **http/sse (remote)**: the result note contains a **short-lived download
+  URL** (`.../images/<id>`, valid ~10 min). Fetch it (curl / an HTTP tool) and
+  save the bytes to a file, e.g. `curl -sSf <url> -o ./outputs/xxx.png`.
+
+Then report the saved path to the user. If you cannot save, tell the user the
+image is available (inline / at the URL) but not yet stored.
+
+> Whatever the mode, never tell the user a file was written — only the paths
+> you actually created.
 
 ## Verify before you use
 
@@ -89,7 +99,7 @@ and steers the edit; it is **SDXL-only**.
 
 ## Model family (SDXL only)
 
-- The server supports the **SDXL family only** (`IMAGE_MODEL` must be an SDXL
+- The server supports the **SDXL family only** (`PICTURA_MODEL` must be an SDXL
   checkpoint; the default is
   `stabilityai/stable-diffusion-xl-base-1.0`). txt2img, img2img, LoRA and
   ControlNet are all supported. Non-SDXL models are rejected at startup.

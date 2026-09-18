@@ -26,19 +26,20 @@ VS Code, Windsurf, local agent frameworks, …) can connect.
 - Status introspection (`server_status`)
 
 **Key policies**
-- **Stateless**: the server never writes image files to disk in any mode.
-  Results are returned inline as base64 `ImageContent`; the client decides
-  where to save. Text-only clients must decode the base64 (data field) into a
-  file and open it to inspect the result (the tool descriptions and the result
-  note instruct this).
-- **Identical local & remote behavior**: no mode-dependent output handling
-  (results are always returned inline; nothing is written to disk). One
-  deliberate exception: `edit_image` may read host file paths on a local stdio
-  run but not over http/sse (see §2 / §5) — convenient locally, secure remotely.
+- **Stateless**: the server never writes image files to disk in any mode. How
+  results are returned depends on the transport: **stdio** returns the image
+  inline as base64 `ImageContent` (text clients decode the data field into a
+  file and open it to inspect); **http/sse** returns a **short-lived download
+  URL** in the result note (image sits in a small in-memory TTL cache served at
+  `GET /images/<id>`, so the client needs no shared filesystem). Everything is
+  gone when the process exits.
+- **Identical local & remote behavior**: the only mode-dependent differences
+  are deliberate: image delivery (inline vs URL) and `edit_image` host-path
+  reads (stdio only, see §2 / §5). Output is never written to disk in any mode.
 - **Concurrency**: requests are accepted concurrently (the event loop never
   blocks on GPU work). Rendering runs on a slot pool; the pool size is derived
   from measured free VRAM (per extra slot: another full weight set + activation
-  footprint + fixed reserve; capped; `IMAGE_MAX_CONCURRENT` overrides). Each
+  footprint + fixed reserve; capped; `PICTURA_MAX_CONCURRENT` overrides). Each
   slot is an independent pipeline instance so LoRA/offload/scheduler state
   never races between concurrent jobs.
 - **Tools never accept a path**: the save location is not controllable through
@@ -68,7 +69,7 @@ Edits an existing image with a prompt (img2img).
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `prompt` | string | — | required |
-| `image` | string | — | required. Source image: local file path / `file://` URI (local stdio run only) or `data:image/...;base64,...` URI (everywhere, portable). Over http/sse only `data:` URIs are accepted — the server reads no host files (`IMAGE_ALLOW_HOST_PATHS` forces it either way) |
+| `image` | string | — | required. Source image: local file path / `file://` URI (local stdio run only) or `data:image/...;base64,...` URI (everywhere, portable). Over http/sse only `data:` URIs are accepted — the server reads no host files (`PICTURA_ALLOW_HOST_PATHS` forces it either way) |
 | `negative_prompt` | string | `""` | |
 | `strength` | float | 0.6 | 0..1, higher = more change |
 | `width` / `height` | int | 0 | 0 = keep source size; clamped to [256, 1024], multiple of 8 |
@@ -90,9 +91,11 @@ guidance. **No model identifiers are exposed** (they stay server-side).
 Reports `model`, `device`, `dtype`, `offload`, `weights_gb`, `vram_gb`,
 `concurrency_slots`, `load_seconds`.
 
-**All tools return** `ImageContent` (base64 PNG, mime `image/png`) + a
-`TextContent` note. The note states the suggested client-side filename and that
-no file was written on the server. On failure a text error is returned.
+**All tools return**: over **stdio** an `ImageContent` (base64 PNG, mime
+`image/png`) + a `TextContent` note; over **http/sse** a single `TextContent`
+note containing a short-lived download URL (`http://<base>/images/<id>`, TTL
+`PICTURA_IMAGE_URL_TTL`, default 600 s) plus optionally the bearer token in the
+URL when `PICTURA_IMAGE_URL_AUTH=token`. On failure a text error is returned.
 
 ---
 
@@ -120,25 +123,25 @@ no file was written on the server. On failure a text error is returned.
 
 ### Model family (SDXL only)
 
-This server supports the **SDXL family only**. `IMAGE_MODEL` must reference an
+This server supports the **SDXL family only**. `PICTURA_MODEL` must reference an
 SDXL checkpoint (default `stabilityai/stable-diffusion-xl-base-1.0`; the id
 must contain `xl`); finetunes and SDXL-derivative checkpoints work by simply
 swapping the model id. Non-SDXL values are rejected at startup (exit 2).
 
 When swapping in an SDXL finetune, review the LoRA / ControlNet allowlists:
 LoRA ids are default-allowlisted for the base checkpoints, so other adapters
-require `IMAGE_LORA_ALLOWLIST` (or `*`), and the ControlNet models must be
+require `PICTURA_LORA_ALLOWLIST` (or `*`), and the ControlNet models must be
 SDXL-compatible (the internal allowlist handles that).
 
 ### LoRA / ControlNet allowlist & downloads
 - **Default allowlist** of generic SDXL LoRAs (`nerijs/pixel-art-xl`,
-  `CiroN2022/toy-face`) via `IMAGE_LORA_ALLOWLIST`. ControlNet is exposed as
+  `CiroN2022/toy-face`) via `PICTURA_LORA_ALLOWLIST`. ControlNet is exposed as
   abstract `control_type`s (`canny` / `depth` / `openpose`, in-memory
   preprocessed server-side); the backing model is resolved from an
-  internal `IMAGE_CONTROLNET_ALLOWLIST` and is **not exposed to clients**.
+  internal `PICTURA_CONTROLNET_ALLOWLIST` and is **not exposed to clients**.
 - URLs and local paths are always rejected; weights load safetensors-only.
 - Allowlisted models are **pre-downloaded at service startup** (skip with
-  `IMAGE_SKIP_PREFETCH=1`); download location via `IMAGE_MODEL_CACHE_DIR`.
+  `PICTURA_SKIP_PREFETCH=1`); download location via `PICTURA_MODEL_CACHE_DIR`.
 
 ---
 
@@ -159,6 +162,13 @@ python server/pictura_server.py [options]
 
 - http → endpoint `/mcp` (streamable HTTP, JSON responses)
 - sse → endpoint `/sse`
+- **Image downloads**: `GET /images/<id>` serves cached generated images
+  (see §1 / §6). Set `PICTURA_PUBLIC_URL` when binding `0.0.0.0` or behind
+  NAT / a reverse proxy so the URLs returned to clients are reachable; without
+  it the server falls back to inline returns with a warning.
+- **Image return mode**: stdio → inline base64; http/sse → short-lived URL
+  (URL only; no inline bytes), unless no public base is resolvable (falls back
+  to inline).
 
 ---
 
@@ -178,9 +188,15 @@ python server/pictura_server.py [options]
   server-side file paths / `file://` URIs are rejected outright (a
   `ValueError`), so a remote client cannot point the server at an arbitrary
   host file. A local (stdio) run may read paths because the client is on the
-  same host and already trusted with the filesystem; `IMAGE_ALLOW_HOST_PATHS`
+  same host and already trusted with the filesystem; `PICTURA_ALLOW_HOST_PATHS`
   forces either behavior explicitly (the tool schema reflects the mode).
-- Remote `output_dir`-style control is not offered at all (removed by design).
+- **Image URLs are capability links**: each generated-image URL embeds an
+  unguessable id (192-bit random) and expires after `PICTURA_IMAGE_URL_TTL`;
+  images are cached in RAM only (never on disk) and vanish with the process.
+  With `PICTURA_IMAGE_URL_AUTH=token` fetching also requires the MCP bearer
+  token, so a leaked URL alone is not enough.
+- No output-directory control is offered: tools accept no output path and the
+  server never persists images.
 
 ---
 
@@ -188,20 +204,26 @@ python server/pictura_server.py [options]
 
 | Var | Default | Meaning |
 |---|---|---|
-| `IMAGE_MODEL` | `stabilityai/stable-diffusion-xl-base-1.0` | HF model id |
-| `IMAGE_VAE` | unset | optional VAE override |
-| `IMAGE_DEVICE` | `cuda` | `cuda` or `cpu` (auto-fallback to cpu) |
-| `IMAGE_CUDA_DEVICE` | unset | restrict CUDA GPU(s) (`0`, `0,1`) → `CUDA_VISIBLE_DEVICES` |
-| `IMAGE_MODEL_CACHE_DIR` | HF cache | model download/cache directory |
-| `IMAGE_LORA_ALLOWLIST` | built-in default | override LoRA allowlist (comma-separated; `*` = any `org/repo`) |
-| `IMAGE_CONTROLNET_ALLOWLIST` | built-in default | override ControlNet allowlist (same semantics) |
-| `IMAGE_SKIP_PREFETCH` | unset | `1` = skip pre-downloading allowlisted models at startup |
-| `IMAGE_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
-| `IMAGE_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
-| `IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse |
-| `IMAGE_ALLOW_HOST_PATHS` | `auto` | force whether `edit_image` may read host file paths: `auto` (default) = allowed on stdio/local, denied over http/sse; `0` = always data-URI-only; `1` = always allow (operator's risk, token already gates remote) |
+| `PICTURA_MODEL` | `stabilityai/stable-diffusion-xl-base-1.0` | HF model id |
+| `PICTURA_VAE` | unset | optional VAE override |
+| `PICTURA_DEVICE` | `cuda` | `cuda` or `cpu` (auto-fallback to cpu) |
+| `PICTURA_CUDA_DEVICE` | unset | restrict CUDA GPU(s) (`0`, `0,1`) → `CUDA_VISIBLE_DEVICES` |
+| `PICTURA_MODEL_CACHE_DIR` | HF cache | model download/cache directory |
+| `PICTURA_LORA_ALLOWLIST` | built-in default | override LoRA allowlist (comma-separated; `*` = any `org/repo`) |
+| `PICTURA_CONTROLNET_ALLOWLIST` | built-in default | override ControlNet allowlist (same semantics) |
+| `PICTURA_SKIP_PREFETCH` | unset | `1` = skip pre-downloading allowlisted models at startup |
+| `PICTURA_MAX_CONCURRENT` | `auto` | render slot pool size: integer pins it, `1` = strictly serial, `auto` = sized from free VRAM |
+| `PICTURA_PUBLIC_URL` | unset | externally visible base URL for image download links (required when binding `0.0.0.0` / behind NAT) |
+| `PICTURA_IMAGE_URL_TTL` | `600` | seconds an image download URL stays valid |
+| `PICTURA_IMAGE_URL_MAX` | `64` | max images kept in the in-memory URL cache |
+| `PICTURA_IMAGE_URL_MAX_MB` | `512` | max total bytes of the URL cache |
+| `PICTURA_IMAGE_URL_AUTH` | `none` | `token` = also require the MCP bearer token to fetch `/images/*` |
+| `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
+| `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
+| `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse |
+| `PICTURA_ALLOW_HOST_PATHS` | `auto` | force whether `edit_image` may read host file paths: `auto` (default) = allowed on stdio/local, denied over http/sse; `0` = always data-URI-only; `1` = always allow (operator's risk, token already gates remote) |
 | `PICTURA_MCP_TOKEN` | unset | bearer token; fallback when `--token` not given |
-| `IMAGE_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
+| `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
 ---
 
@@ -211,7 +233,7 @@ Base64 images arrive inside the HTTP request body, so `--max-body-mb` governs.
 Default is **16 MB ≈ 12 MB actual image** — plenty of headroom over the ~1.6 MB
 outputs and typical camera JPEGs, and above Claude's ≈5 MB per-image inline
 limit. (OpenAI allows up to 512 MB/request and Gemini ≈100 MB inline; raise
-`IMAGE_MAX_BODY_MB` / `--max-body-mb` only if you really pass such large
+`PICTURA_MAX_BODY_MB` / `--max-body-mb` only if you really pass such large
 sources.) Stdio (local) has no body cap.
 
 ---
@@ -227,7 +249,7 @@ bound to any client. Every client stores server definitions in the same shape:
     "generate-image": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
-      "env": { "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" }
+      "env": { "PICTURA_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" }
     }
   }
 }
@@ -291,8 +313,6 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 - 10.7 MB JPEG (14 MB base64 body) accepted for img2img input.
 - Remote with token: 401 on missing/wrong token; initialize + tools/list OK.
 - Statelessness: `outputs/` unchanged after generation via MCP.
-- Latent bug found/removed during validation: stray `path` reference in
-  `edit_image`.
 
 ---
 

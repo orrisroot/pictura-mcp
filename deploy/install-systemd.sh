@@ -5,7 +5,7 @@
 # Usage (as root):
 #   deploy/install-systemd.sh [PROJECT_ROOT] [SERVICE_USER] [PORT]
 #   default: PROJECT_ROOT = script's repo root, SERVICE_USER = pictura-mcp, PORT = 8000
-#   PORT seeds IMAGE_PORT in the env file (an existing IMAGE_PORT value wins).
+#   PORT seeds PICTURA_PORT in the env file (an existing PICTURA_PORT value wins).
 #
 # Optional flag:
 #   --adopt-env  record the current env.example template as adopted (after you
@@ -80,10 +80,10 @@ seed_env() {
   fi
 }
 # HF default cache (~/.cache) is read-only under ProtectSystem=strict.
-seed_env IMAGE_MODEL_CACHE_DIR "$PROJECT_ROOT/.model-cache"
-CACHE_DIR="$(grep '^IMAGE_MODEL_CACHE_DIR=' "$ENV_FILE" | cut -d= -f2-)"
-seed_env IMAGE_HOST 0.0.0.0
-seed_env IMAGE_PORT "$PORT"
+seed_env PICTURA_MODEL_CACHE_DIR "$PROJECT_ROOT/.model-cache"
+CACHE_DIR="$(grep '^PICTURA_MODEL_CACHE_DIR=' "$ENV_FILE" | cut -d= -f2-)"
+seed_env PICTURA_HOST 0.0.0.0
+seed_env PICTURA_PORT "$PORT"
 # server writes only to the model cache at runtime (--smoke is a manual run).
 if [[ -n $CACHE_DIR ]]; then
   mkdir -p "$CACHE_DIR"
@@ -124,9 +124,9 @@ else
   # template changed since the recorded fingerprint: keep the env, write .new
   cp "$TEMPLATE" "$NEW_FILE"
   sed -i -e "s#<PROJECT_ROOT>#$PROJECT_ROOT#g" \
-         -e "s|^# IMAGE_MODEL_CACHE_DIR=.*|IMAGE_MODEL_CACHE_DIR=$PROJECT_ROOT/.model-cache|" \
-         -e "s|^# IMAGE_HOST=.*|IMAGE_HOST=0.0.0.0|" \
-         -e "s|^# IMAGE_PORT=.*|IMAGE_PORT=$PORT|" "$NEW_FILE"
+         -e "s|^# PICTURA_MODEL_CACHE_DIR=.*|PICTURA_MODEL_CACHE_DIR=$PROJECT_ROOT/.model-cache|" \
+         -e "s|^# PICTURA_HOST=.*|PICTURA_HOST=0.0.0.0|" \
+         -e "s|^# PICTURA_PORT=.*|PICTURA_PORT=$PORT|" "$NEW_FILE"
   chmod 600 "$NEW_FILE"
   echo "  template changed (your env file is untouched) - wrote the latest template to ${NEW_FILE##*/}"
   echo "    diff:  diff $ENV_FILE $NEW_FILE"
@@ -144,8 +144,8 @@ sed -e "s#<PROJECT_ROOT>#$PROJECT_ROOT#g" \
 # model cache dir (and log file, when set) so prefetch/download writes work.
 RW_PATHS=""
 if [[ -n $CACHE_DIR ]]; then RW_PATHS="$CACHE_DIR"; fi
-if grep -q '^IMAGE_LOG_FILE=' "$ENV_FILE"; then
-  LOG_FILE="$(grep '^IMAGE_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
+if grep -q '^PICTURA_LOG_FILE=' "$ENV_FILE"; then
+  LOG_FILE="$(grep '^PICTURA_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
   [[ -n $RW_PATHS ]] && RW_PATHS="$RW_PATHS $LOG_FILE" || RW_PATHS="$LOG_FILE"
 fi
 if [[ -n $RW_PATHS ]]; then
@@ -153,8 +153,8 @@ if [[ -n $RW_PATHS ]]; then
 else
   sed -i "s#^ReadWritePaths=.*#ReadWritePaths=#" "$UNIT"
 fi
-if grep -q '^IMAGE_LOG_FILE=' "$ENV_FILE"; then
-  LOG_FILE="$(grep '^IMAGE_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
+if grep -q '^PICTURA_LOG_FILE=' "$ENV_FILE"; then
+  LOG_FILE="$(grep '^PICTURA_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
   LOG_DIR="$(dirname "$LOG_FILE")"
   mkdir -p "$LOG_DIR"
   chown "$SERVICE_USER":"$SERVICE_USER" "$LOG_DIR" 2>/dev/null || true
@@ -173,7 +173,7 @@ fi
 echo
 echo "Done. NEXT STEPS:"
 echo "  1. review the env file - the token is already randomized and the essentials"
-echo "     (IMAGE_MODEL_CACHE_DIR / IMAGE_HOST / IMAGE_PORT) are pre-seeded;"
+echo "     (PICTURA_MODEL_CACHE_DIR / PICTURA_HOST / PICTURA_PORT) are pre-seeded;"
 echo "     edit only what needs changing:"
 echo "        sudoedit $ENV_FILE"
 echo "     If the installer said 'template changed', your env is untouched; the latest"
@@ -181,7 +181,7 @@ echo "     template is saved as ${ENV_FILE##*/}.new - diff & merge it, then re-r
 echo "     --adopt-env to record it (new keys are still seeded every run)."
 echo "  2. start the service:"
 echo "        systemctl start pictura-mcp"
-PORT_EFF="$(grep '^IMAGE_PORT=' "$ENV_FILE" | cut -d= -f2-)"
+PORT_EFF="$(grep '^PICTURA_PORT=' "$ENV_FILE" | cut -d= -f2-)"
 PORT_EFF="${PORT_EFF:-$PORT}"
 echo "  3. verify - watch the log until 'MCP http server: http://...:${PORT_EFF}/mcp'"
 echo "     and 'Model ready' appear:"
@@ -192,7 +192,7 @@ echo "     (template: deploy/mcp.remote.json.example)"
 echo "  5. open the port in your firewall if remote machines must reach the GPU box."
 echo
 echo "More follow-ups:"
-echo "  - logs: journalctl -u pictura-mcp -f   (or IMAGE_LOG_FILE when set)"
+echo "  - logs: journalctl -u pictura-mcp -f   (or PICTURA_LOG_FILE when set)"
 echo "  - TO READ THE LOG FILE AS A NON-ROOT OPERATOR, add them to the log group:"
 echo "        sudo usermod -aG $SERVICE_USER <your-username>   # then re-login"
 echo "    (logrotate recreate uses group $SERVICE_USER - see deploy/logrotate.example)"

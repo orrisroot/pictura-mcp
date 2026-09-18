@@ -31,14 +31,19 @@ embedded in each tool's input schema (visible to MCP clients); `list_loras` /
 `list_control_types` return the valid values, and ControlNet model identifiers
 stay server-side.
 
-Stateless by design: images are returned inline as base64 (`ImageContent`,
-PNG) and **never written to the server disk**; local and remote behavior are
-identical. The server's tool result is `[image content, text note]` — unless
-your MCP client renders image blocks for you, **the assistant does not see
-the pixels**: it must decode the returned base64 (data field) into a local
-file (e.g. save as PNG) and open it with file/view tools to verify the
-result. The tool descriptions and the result note explain this to the
-client.
+Stateless by design: images are **never written to the server disk**. How they
+are returned depends on the transport:
+
+- **stdio** (local): inline base64 `ImageContent` + a `TextContent` note. The
+  assistant must decode the returned base64 (data field) into a local file
+  (e.g. save as PNG) and open it to inspect the result.
+- **http/sse** (remote): the result note contains a **short-lived download
+  URL** (e.g. `http://<host>:8000/images/<unguessable-id>`); the client fetches
+  it with HTTP tools and saves it — no shared filesystem needed. Each URL is
+  valid for a short TTL (default 600 s) from a small in-memory cache; nothing
+  is persisted.
+
+The tool descriptions and the result note explain this on every call.
 
 **Concurrent requests** are accepted: the server handles multiple MCP clients
 and parallel tool calls without ever blocking its event loop. Rendering runs
@@ -48,7 +53,7 @@ other. The pool size is sized automatically from measured free VRAM once the
 model is loaded (per extra slot costs a full set of weights plus one job's
 activation footprint, with a safety margin) — e.g. 3 slots on a 32 GB V100
 with SDXL fp16, and 1 (strictly serial) on smaller cards. Override it with
-`IMAGE_MAX_CONCURRENT` (an integer pins the pool; `auto` = VRAM-based). Note
+`PICTURA_MAX_CONCURRENT` (an integer pins the pool; `auto` = VRAM-based). Note
 that extra slots are built lazily: the first burst of parallel jobs may pay
 one model-load per extra slot.
 
@@ -115,7 +120,7 @@ Every MCP client stores server definitions in the same shape
     "generate-image": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
-      "env": { "IMAGE_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" },
+      "env": { "PICTURA_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" },
       "requestTimeoutMs": 600000
     }
   }
@@ -170,11 +175,19 @@ You can also run the server as an independent process that clients reach over
 - **Host files are not read remotely**: over http/sse, `edit_image` accepts
   only `data:` URIs — no server-side file paths / `file://` URIs (secure
   default). Only a **local stdio run** may read host paths (see § Image
-  editing / `IMAGE_ALLOW_HOST_PATHS`).
+  editing / `PICTURA_ALLOW_HOST_PATHS`).
 - `--max-body-mb <MB>` (default 16) caps the HTTP request body; base64 images
   arrive in the body
 - The server is **stateless**: no image files are written on the server in any
-  mode; clients receive base64 and save where they like
+  mode. Over http/sse each generated image is returned as a **short-lived
+  download URL** (served from an in-memory TTL cache at `GET /images/<id>`);
+  over stdio it is returned inline as base64. Clients save the image wherever
+  they like.
+- **`PICTURA_PUBLIC_URL`** must be set when the server binds `0.0.0.0` (or the
+  box sits behind NAT / a reverse proxy) so image URLs point at an address the
+  client can reach; otherwise the server falls back to inline returns with a
+  warning. Cache knobs: `PICTURA_IMAGE_URL_TTL` (600 s), `PICTURA_IMAGE_URL_MAX`
+  (64), `PICTURA_IMAGE_URL_MAX_MB` (512), `PICTURA_IMAGE_URL_AUTH`.
 
 Remote client config (`deploy/mcp.remote.json.example`):
 
@@ -211,10 +224,10 @@ sudo deploy/install-systemd.sh /absolute/path/to/this/repo pictura-mcp 8000
 The installer prints the next steps; the essentials are already prepared:
 
 - `deploy/pictura-mcp.env` is created from the template with an
-  **auto-randomized `PICTURA_MCP_TOKEN`**, and `IMAGE_MODEL_CACHE_DIR` /
-  `IMAGE_HOST=0.0.0.0` / `IMAGE_PORT` are **pre-seeded** — edit only what needs
-  changing (`sudoedit deploy/pictura-mcp.env`; e.g. `IMAGE_MODEL`,
-  `IMAGE_CUDA_DEVICE`, `IMAGE_LOG_FILE`)
+  **auto-randomized `PICTURA_MCP_TOKEN`**, and `PICTURA_MODEL_CACHE_DIR` /
+  `PICTURA_HOST=0.0.0.0` / `PICTURA_PORT` are **pre-seeded** — edit only what needs
+  changing (`sudoedit deploy/pictura-mcp.env`; e.g. `PICTURA_MODEL`,
+  `PICTURA_CUDA_DEVICE`, `PICTURA_LOG_FILE`)
 - start and verify:
 
 ```bash
@@ -223,7 +236,7 @@ journalctl -u pictura-mcp -f
 # wait for:  MCP http server: http://0.0.0.0:8000/mcp ... Model ready (...)
 
 # client config: copy deploy/mcp.remote.json.example and set
-#   url: http://<this-box-ip>:8000/mcp   (port = IMAGE_PORT from the env file)
+#   url: http://<this-box-ip>:8000/mcp   (port = PICTURA_PORT from the env file)
 #   Authorization: Bearer <PICTURA_MCP_TOKEN from deploy/pictura-mcp.env>
 ```
 
@@ -236,11 +249,11 @@ This runs under the unprivileged `pictura-mcp` system account with hardening
 makes the FS read-only, so the installer whitelists the model cache dir and log
 file in `ReadWritePaths` (derived from `deploy/pictura-mcp.env`; log file is
 0640, owner = service account, group = service account). The installer also
-activates commented-out defaults in the env file (`IMAGE_MODEL_CACHE_DIR`,
-`IMAGE_HOST`, `IMAGE_PORT`) — the HF default cache in the service user's home
+activates commented-out defaults in the env file (`PICTURA_MODEL_CACHE_DIR`,
+`PICTURA_HOST`, `PICTURA_PORT`) — the HF default cache in the service user's home
 directory stays read-only under `ProtectSystem=strict`, so a cache dir must
 always be set or model prefetch keeps re-downloading. If you later change
-`IMAGE_MODEL_CACHE_DIR` / `IMAGE_LOG_FILE`, re-run the installer (it re-renders
+`PICTURA_MODEL_CACHE_DIR` / `PICTURA_LOG_FILE`, re-run the installer (it re-renders
 the unit and restarts the service). Non-root operators
 read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>`
 (then log out/in). If the service crashes at startup, remove
@@ -276,14 +289,14 @@ Log rotation: `deploy/logrotate.example` (copytruncate, or SIGHUP postrotate).
 > `server_status`; missing/wrong tokens get 401; clients connect over stdio and
 > over HTTP.
 
-## Model (env `IMAGE_MODEL`)
+## Model (env `PICTURA_MODEL`)
 
 SDXL family only:`stabilityai/stable-diffusion-xl-base-1.0` (default) or any
 other SDXL checkpoint (finetunes and derivatives included - just swap the
-`IMAGE_MODEL` id; the id must contain `xl`). The server refuses to start
-(`exit 2`) when `IMAGE_MODEL` is not an SDXL-family checkpoint.
+`PICTURA_MODEL` id; the id must contain `xl`). The server refuses to start
+(`exit 2`) when `PICTURA_MODEL` is not an SDXL-family checkpoint.
 
-Set `IMAGE_MODEL` in your client's server `env` (or the systemd env file), then
+Set `PICTURA_MODEL` in your client's server `env` (or the systemd env file), then
 restart/reconnect the client. Defaults: **1024×1024 / 30 steps**. On
 lower-VRAM cards the SDXL weights auto-fall back to CPU offload; CUDA-OOM at
 runtime also auto-offloads and retries.
@@ -295,7 +308,7 @@ runtime also auto-offloads and retries.
 - **`image`**: a local file path or `file://` URI on a **local stdio run**, or a
   `data:image/...;base64,...` URI (works everywhere — portable across machines).
   Over **http/sse (remote)** the server reads no host files: `data:` URIs only
-  (secure default). Override the default with `IMAGE_ALLOW_HOST_PATHS=0|1`.
+  (secure default). Override the default with `PICTURA_ALLOW_HOST_PATHS=0|1`.
 - **`strength`** (0..1, default 0.6): higher = larger change
 - **`width`/`height`** (0 = keep source size; clamp ≤1024, multiple of 8)
 
@@ -310,11 +323,11 @@ model copy). `--smoke` also exercises the img2img path.
   very large source images.
 - fp16 + attention/VAE slicing + proactive CPU offload + OOM auto-retry are all
   baked in for low-VRAM cards.
-- GPU selection: set `IMAGE_CUDA_DEVICE` (e.g. `0` or `0,1`) to restrict which
+- GPU selection: set `PICTURA_CUDA_DEVICE` (e.g. `0` or `0,1`) to restrict which
   CUDA GPU(s) the server uses (`CUDA_VISIBLE_DEVICES`).
-- Log destination: set `IMAGE_LOG_FILE` (or `--log-file <path>`) to append the
+- Log destination: set `PICTURA_LOG_FILE` (or `--log-file <path>`) to append the
   `[pictura-mcp]` log to a file instead of stderr/journald (handy for systemd).
-- Host-path image input: `IMAGE_ALLOW_HOST_PATHS=0|1` forces whether
+- Host-path image input: `PICTURA_ALLOW_HOST_PATHS=0|1` forces whether
   `edit_image` may read host file paths (default: allowed on stdio/local,
   denied over http/sse — see § Image editing).
   Logrotate-ready: the server reopens its log file on `SIGHUP`, and a
@@ -346,16 +359,16 @@ Requires the `peft` dependency (listed in `server/requirements.txt`).
 
 **Allowlist & downloads**
 - Client-supplied `lora` ids are restricted to a **built-in default allowlist**,
-  extendable via `IMAGE_LORA_ALLOWLIST` (comma-separated overrides;
+  extendable via `PICTURA_LORA_ALLOWLIST` (comma-separated overrides;
   `*` = allow any bare `org/repo` id). URLs, local paths and path traversal are
   always rejected, and weights load safetensors-only.
 - **ControlNet ids are server-side and hidden** — clients only choose an abstract
   `control_type`; the backing model is resolved from an internal allowlist
-  (`IMAGE_CONTROLNET_ALLOWLIST`).
+  (`PICTURA_CONTROLNET_ALLOWLIST`).
 - Allowlisted models are **pre-downloaded at service startup** into the model
-  cache, so tool calls don't pay the download cost. Set `IMAGE_SKIP_PREFETCH=1`
+  cache, so tool calls don't pay the download cost. Set `PICTURA_SKIP_PREFETCH=1`
   to disable.
-- Download location: `IMAGE_MODEL_CACHE_DIR` (default: the Hugging Face cache).
+- Download location: `PICTURA_MODEL_CACHE_DIR` (default: the Hugging Face cache).
 
 ## Docs
 
