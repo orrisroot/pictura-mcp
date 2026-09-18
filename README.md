@@ -117,7 +117,7 @@ Every MCP client stores server definitions in the same shape
 ```jsonc
 {
   "mcpServers": {
-    "generate-image": {
+    "pictura": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": { "PICTURA_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" },
@@ -196,7 +196,7 @@ Remote client config (`deploy/mcp.remote.json.example`):
 ```json
 {
   "mcpServers": {
-    "generate-image": {
+    "pictura": {
       "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
       "headers": { "PICTURE_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000,

@@ -1237,7 +1237,7 @@ _IMG_FIELD_DESC_REMOTE = (
 
 def _build_server():
     server = MCPServer(
-        name="generate-image",
+        name="pictura",
         version="0.1.0",
         title="Image Generation (SDXL)",
         instructions=(

@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "generate-image": {
+    "pictura": {
       "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
       "headers": {
         "PICTURE_API_KEY": "<TOKEN>"

@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "generate-image": {
+    "pictura": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": {

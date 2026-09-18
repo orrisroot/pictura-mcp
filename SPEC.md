@@ -241,7 +241,7 @@ bound to any client. Every client stores server definitions in the same shape:
 ```jsonc
 {
   "mcpServers": {
-    "generate-image": {
+    "pictura": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": { "PICTURA_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" }
@@ -260,7 +260,7 @@ bound to any client. Every client stores server definitions in the same shape:
 ```json
 {
   "mcpServers": {
-    "generate-image": {
+    "pictura": {
       "url": "http://<HOST>:8000/mcp",
       "headers": { "PICTURE_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000
