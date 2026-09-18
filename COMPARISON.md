@@ -24,7 +24,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 | Remote / headless | ✅ + systemd unit | ✅ (LAN/VPS) | hosted | hosted | hosted |
 | Auth on your server | ✅ bearer token | ⚠️ not emphasized (LAN) | platform auth | platform API key | platform API key |
 | Server stateless (no files kept on host) | ✅ always, identical local/remote | ⚠️ writes files/workflows | n/a | `local` output mode writes to disk | n/a (URLs on CDN) |
-| Image input size cap | **128 MB body** (~96 MB img), tunable | depends on upload | platform | URL/base64 support | CDN upload flow |
+| Image input size cap | **16 MB body** (~12 MB img) default, tunable via `IMAGE_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
 | Ecosystem / maturity | self-maintained, small | very large (Civitai workflows, plugins) | vendor, large | growing | large (600+ models) |
 
 ## 2. Where this project wins
@@ -39,8 +39,10 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
   as a single systemd service behind a bearer token.
 - **Low-VRAM-friendly engineering**: fp16, slicing, proactive CPU offload and OOM
   auto-retry are built in and default-on for SDXL at 1024 px.
-- **Big image input**: 128 MB request body — above Claude (≈5 MB), OpenAI
-  (512 MB/request) and Gemini (≈100 MB) per-image limits.
+- **Decent image input**: 16 MB request body by default (≈12 MB image) — well
+  above Claude's ≈5 MB per-image inline limit and headroom over the ~1.6 MB
+  outputs; raise `--max-body-mb` / `IMAGE_MAX_BODY_MB` only if you really
+  pass very large sources.
 
 ## 3. Where established MCPs win
 
