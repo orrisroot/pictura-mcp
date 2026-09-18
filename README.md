@@ -183,11 +183,14 @@ You can also run the server as an independent process that clients reach over
   download URL** (served from an in-memory TTL cache at `GET /images/<id>`);
   over stdio it is returned inline as base64. Clients save the image wherever
   they like.
-- **`PICTURA_PUBLIC_URL`** must be set when the server binds `0.0.0.0` (or the
-  box sits behind NAT / a reverse proxy) so image URLs point at an address the
-  client can reach; otherwise the server falls back to inline returns with a
-  warning. Cache knobs: `PICTURA_IMAGE_URL_TTL` (600 s), `PICTURA_IMAGE_URL_MAX`
-  (64), `PICTURA_IMAGE_URL_MAX_MB` (512), `PICTURA_IMAGE_URL_AUTH`.
+- Image URLs over http/sse are built from the request's `Host` header by
+  default (reverse-proxy friendly), so **`PICTURA_PUBLIC_URL` is usually not
+  needed**; set it only to force a specific externally visible base (e.g.
+  behind NAT). Troubleshooting knobs: `PICTURA_IMAGE_URL_TTL` (600 s),
+  `PICTURA_IMAGE_URL_MAX` (64), `PICTURA_IMAGE_URL_MAX_MB` (512),
+  `PICTURA_IMAGE_URL_AUTH`, and `PICTURA_FORWARDED_ALLOW_IPS` (uvicorn's
+  forwarded-allow-ips, default `127.0.0.1`) when a reverse proxy sits on
+  another host.
 
 Remote client config (`deploy/mcp.remote.json.example`):
 

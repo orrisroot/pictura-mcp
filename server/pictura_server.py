@@ -29,7 +29,9 @@ Configuration (environment variables):
     PICTURA_LOG_FILE                append [pictura-mcp] logs to a file (default: stderr)
 
 URL image return (http/sse only):
-    PICTURA_PUBLIC_URL              externally visible base URL (required for 0.0.0.0)
+    PICTURA_PUBLIC_URL              externally visible base URL; default = the
+                                  request's Host header (reverse-proxy friendly)
+    PICTURA_FORWARDED_ALLOW_IPS     uvicorn forwarded-allow-ips (default 127.0.0.1)
     PICTURA_IMAGE_URL_TTL            short-term cache lifetime for image URLs, seconds
                                   (default 600)
     PICTURA_IMAGE_URL_MAX            max cached images (default 64)
@@ -194,6 +196,13 @@ _URL_MAX_BYTES = max(
     1, int(_env("PICTURA_IMAGE_URL_MAX_MB", "512") or 512)
 ) * 1024 * 1024
 _URL_AUTH = (_env("PICTURA_IMAGE_URL_AUTH") or "none").strip().lower()
+# Explicit public base for image URLs. If unset, the base is derived from the
+# incoming request (reverse proxy Host / X-Forwarded-Proto), falling back to
+# the bind address.
+_PUBLIC_BASE = (_env("PICTURA_PUBLIC_URL") or "").strip().rstrip("/") or None
+# uvicorn --forwarded-allow-ips: peers whose X-Forwarded-* headers are trusted
+# (reverse proxies on the same host are trusted by default).
+_FWD_ALLOW_IPS = (_env("PICTURA_FORWARDED_ALLOW_IPS") or "127.0.0.1").strip()
 
 
 class _ImageCache:
@@ -246,23 +255,19 @@ class _ImageCache:
 
 
 _img_cache = _ImageCache(_URL_MAX, _URL_MAX_BYTES, _URL_TTL)
-# Image return mode. "url": tool result is a short-lived download URL (http/sse
-# with a resolvable public base); "inline": result is the base64 ImageContent
-# (stdio, or http without a usable public URL). Set in main() from the transport.
+# Image return mode: "url" for http/sse (result is a short-lived download URL),
+# "inline" for stdio (base64 ImageContent). Set in main() from the transport.
 _RETURN_MODE = "inline"
+# Startup fallback base URL (from the bind address); per-request Host wins.
 _URL_BASE: str | None = None
 
 
-def _resolve_public_base(host: str, port: int) -> str | None:
-    """The base URL clients use to fetch image URLs (http/sse mode).
+def _bind_base(host: str, port: int) -> str | None:
+    """Fallback image-URL base from the bind address (no request host yet).
 
-    PICTURA_PUBLIC_URL wins (handles NAT / reverse proxy). When the server
-    binds 0.0.0.0 the externally visible address is unknown, so no URL can be
-    built - set PICTURA_PUBLIC_URL for URL-only returns.
+    Returns None for 0.0.0.0, where the externally visible address is unknown;
+    there the URL base is derived from the request Host (or PICTURA_PUBLIC_URL).
     """
-    configured = (_env("PICTURA_PUBLIC_URL") or "").strip().rstrip("/")
-    if configured:
-        return configured
     if host in ("0.0.0.0", "::", ""):
         return None
     return f"http://{host}:{port}"
@@ -1146,24 +1151,53 @@ def _finalize_result(image, actual_seed: int, t0: float, prefix: str = "img") ->
     return data, b64, round(time.time() - t0, 1), name
 
 
+def _request_base(ctx) -> str | None:
+    """Externally visible base URL of the current HTTP request.
+
+    Used to build image download URLs when PICTURA_PUBLIC_URL is not set: a
+    reverse proxy forwards the public Host (and with uvicorn's proxy headers
+    the X-Forwarded-Proto / X-Forwarded-Host), so the resulting URL is
+    reachable by the client. None for stdio or when no request is available;
+    wildcard Host values (0.0.0.0 / ::) are rejected - such URLs are not
+    reachable, so the caller falls back (bind address, then inline).
+    """
+    if ctx is None:
+        return None
+    try:
+        req = ctx.request_context.request
+        if req is not None:
+            host = getattr(req.base_url, "hostname", None)
+            if host in ("0.0.0.0", "::", "", None):
+                return None
+            url = str(req.base_url).rstrip("/")
+            return url or None
+    except Exception:  # noqa: BLE001 - missing context / non-HTTP transport
+        pass
+    return None
+
+
 def _image_result(
     png_bytes: bytes,
     name: str,
     actual_seed: int,
     elapsed: float,
     kind: str = "image",
+    base: str | None = None,
 ):
     """Build the tool result for a generated image.
 
     "url" mode (http/sse): a TextContent note with a short-lived download URL,
     no inline bytes - the client fetches the image and saves it (server and
-    client may not share a filesystem). "inline" mode (stdio / fallback): the
-    base64 ImageContent plus a note; the client decodes and saves.
+    client may not share a filesystem). The base is PICTURA_PUBLIC_URL, else
+    the requesting client's Host (reverse-proxy friendly), else the bind
+    address. "inline" mode (stdio / fallback): the base64 ImageContent plus a
+    note; the client decodes and saves.
     """
-    if _RETURN_MODE == "url" and _URL_BASE:
+    eff_base = _PUBLIC_BASE or base or _URL_BASE
+    if _RETURN_MODE == "url" and eff_base:
         img_id = _img_cache.put(png_bytes)
         if img_id:
-            url = f"{_URL_BASE}/images/{img_id}"
+            url = f"{eff_base}/images/{img_id}"
             note = (
                 f"Success. Download and save the {kind} as {name} (the URL is "
                 f"available for ~{_img_cache.ttl:.0f}s):\n"
@@ -1333,7 +1367,7 @@ def _build_server():
             ]
 
         data, _b64, elapsed, name = _finalize_result(image, actual_seed, t0, prefix="img")
-        return _image_result(data, name, actual_seed, elapsed, kind="image")
+        return _image_result(data, name, actual_seed, elapsed, kind="image", base=_request_base(ctx))
 
     @server.tool(
         name="edit_image",
@@ -1450,7 +1484,7 @@ def _build_server():
             ]
 
         data, _b64, elapsed, name = _finalize_result(edited, actual_seed, t0, prefix="img2img")
-        return _image_result(data, name, actual_seed, elapsed, kind="edited image")
+        return _image_result(data, name, actual_seed, elapsed, kind="edited image", base=_request_base(ctx))
 
     @server.tool(
         name="server_status",
@@ -1631,20 +1665,20 @@ def main() -> int:  # noqa: C901
     http_port = args.port or int(_env("PICTURA_PORT", "8000") or "8000")
     http_host = args.host or _env("PICTURA_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
-    # Image return mode: http/sse with a resolvable public base -> short-lived
-    # download URLs; otherwise (stdio, or 0.0.0.0 without PICTURA_PUBLIC_URL)
-    # -> inline base64.
+    # Image return mode: http/sse -> short-lived download URLs (the base is
+    # PICTURA_PUBLIC_URL, else the request Host from the reverse proxy, else
+    # the bind address); stdio -> inline base64.
     global _RETURN_MODE, _URL_BASE
     if args.transport in ("http", "sse"):
-        _URL_BASE = _resolve_public_base(http_host, http_port)
-        _RETURN_MODE = "url" if _URL_BASE else "inline"
-        if not _URL_BASE:
+        _RETURN_MODE = "url"
+        _URL_BASE = _bind_base(http_host, http_port)
+        if _PUBLIC_BASE:
+            _log(f"image return mode: url (base {_PUBLIC_BASE})")
+        else:
             _log(
-                "WARNING: cannot build image URLs (host=0.0.0.0 and PICTURA_PUBLIC_URL "
-                "not set) - falling back to inline images; set PICTURA_PUBLIC_URL to "
-                "enable URL-only returns"
+                "image return mode: url (base from request Host"
+                + (f", fallback {_URL_BASE})" if _URL_BASE else ", fallback bind address)")
             )
-        _log(f"image return mode: {_RETURN_MODE}" + (f" (base {_URL_BASE})" if _URL_BASE else ""))
     else:
         _RETURN_MODE = "inline"
         _URL_BASE = None
@@ -1761,7 +1795,13 @@ def _run_http_server(
             f"(NO auth - only for trusted LAN, max body {max_body_bytes // (1024 * 1024)} MB)"
         )
 
-    uvicorn.run(_wrap_http_app(mcp_app, token), host=host, port=port, log_level="warning")
+    uvicorn.run(
+        _wrap_http_app(mcp_app, token),
+        host=host,
+        port=port,
+        log_level="warning",
+        forwarded_allow_ips=_FWD_ALLOW_IPS,
+    )
     return 0
 
 
