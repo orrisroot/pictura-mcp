@@ -93,7 +93,7 @@ added=()
 while IFS= read -r line; do
   [[ "$line" =~ ^[#[:space:]]*([A-Z_][A-Z0-9_]*)= ]] || continue
   key="${BASH_REMATCH[1]}"
-  [[ "$key" == PICTURA_MCP_TOKEN ]] && continue
+  [[ "$key" == PICTURE_API_KEY ]] && continue
   val="${line#*=}"
   val="${val//<PROJECT_ROOT>/$PROJECT_ROOT}"
   if new_key "$key" "$val"; then
@@ -102,13 +102,13 @@ while IFS= read -r line; do
 done < "$TEMPLATE"
 
 # 4) Token: fresh env, empty value, or the placeholder -> generate sk-pictura-...
-cur_token="$(grep '^PICTURA_MCP_TOKEN=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+cur_token="$(grep '^PICTURE_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
 if [[ $created -eq 1 || -z "$cur_token" || "$cur_token" == *"change-me"* ]]; then
   gen="sk-pictura-$(head -c18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  if grep -q '^PICTURA_MCP_TOKEN=' "$ENV_FILE"; then
-    sed -i "s|^PICTURA_MCP_TOKEN=.*|PICTURA_MCP_TOKEN=${gen}|" "$ENV_FILE"
+  if grep -q '^PICTURE_API_KEY=' "$ENV_FILE"; then
+    sed -i "s|^PICTURE_API_KEY=.*|PICTURE_API_KEY=${gen}|" "$ENV_FILE"
   else
-    printf 'PICTURA_MCP_TOKEN=%s\n' "$gen" >> "$ENV_FILE"
+    printf 'PICTURE_API_KEY=%s\n' "$gen" >> "$ENV_FILE"
   fi
   echo "  token: generated (${gen:0:11}...)"
 else
@@ -189,7 +189,7 @@ echo "  3. verify - watch the log until 'MCP http server: http://...:${PORT_EFF}
 echo "     and 'Model ready' appear:"
 echo "        journalctl -u pictura-mcp -f"
 echo "  4. point your MCP client at http://<this-box-ip>:${PORT_EFF}/mcp with the"
-echo "     API key (PICTURE_API_KEY header) from PICTURA_MCP_TOKEN in $ENV_FILE"
+echo "     API key (PICTURE_API_KEY header) from PICTURE_API_KEY in $ENV_FILE"
 echo "     (template: deploy/mcp.remote.json.example)"
 echo "  5. open the port in your firewall if remote machines must reach the GPU box."
 echo

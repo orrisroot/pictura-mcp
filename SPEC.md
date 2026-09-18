@@ -173,7 +173,7 @@ python server/pictura_server.py [options]
 
 ## 5. Security
 
-- **Remote transports require an API key** (see §6 `PICTURA_MCP_TOKEN`, sent via
+- **Remote transports require an API key** (see §6 `PICTURE_API_KEY`, sent via
   the `PICTURE_API_KEY` header) when the server is exposed beyond localhost.
   The GPU is otherwise reachable by any caller.
 - **Arbitrary-path writes are impossible**: tools accept no output path; the
@@ -217,7 +217,7 @@ python server/pictura_server.py [options]
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
 | `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse |
-| `PICTURA_MCP_TOKEN` | unset | API key; clients send it in the `PICTURE_API_KEY` header; fallback when `--token` not given |
+| `PICTURE_API_KEY` | unset | API key; clients send it in the `PICTURE_API_KEY` header; fallback when `--token` not given |
 | `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
 ---

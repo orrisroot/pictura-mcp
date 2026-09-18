@@ -1627,7 +1627,7 @@ def main() -> int:  # noqa: C901
     parser.add_argument(
         "--token",
         default=None,
-        help="require API key on http/sse via PICTURE_API_KEY header (falls back to $PICTURA_MCP_TOKEN)",
+        help="require API key on http/sse via PICTURE_API_KEY header (falls back to $PICTURE_API_KEY)",
     )
     parser.add_argument(
         "--log-file",
@@ -1643,7 +1643,7 @@ def main() -> int:  # noqa: C901
             flush=True,
         )
         return 2
-    token = args.token or os.environ.get("PICTURA_MCP_TOKEN")
+    token = args.token or os.environ.get("PICTURE_API_KEY")
     http_port = args.port or int(_env("PICTURA_PORT", "8000") or "8000")
     http_host = args.host or _env("PICTURA_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
