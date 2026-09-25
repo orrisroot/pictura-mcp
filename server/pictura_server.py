@@ -85,6 +85,7 @@ import base64
 import io
 import ipaddress
 import logging
+import math
 import os
 import random
 import re
@@ -905,24 +906,73 @@ def _load_source_image(image_src: str, server_origins: frozenset = frozenset()):
     )
 
 
+# Official SDXL ~1MP aspect-ratio buckets (App. I of the SDXL paper): every
+# entry is a resolution the model was actually trained on, with areas close to
+# 1024x1024. Generation snaps to the nearest bucket - off-bucket sizes (e.g.
+# 512x512) cause the tiled/duplicated-pattern artifacts typical of SDXL.
+_SDXL_BUCKET_PAIRS = (
+    (512, 2048), (512, 1984), (512, 1920), (512, 1856),
+    (576, 1792), (576, 1728), (576, 1664),
+    (640, 1600), (640, 1536),
+    (704, 1472), (704, 1408), (704, 1344),
+    (768, 1344), (768, 1280),
+    (832, 1216), (832, 1152),
+    (896, 1152), (896, 1088),
+    (960, 1088), (960, 1024),
+    (1024, 1024), (1024, 960),
+    (1088, 960), (1088, 896),
+    (1152, 896), (1152, 832),
+    (1216, 832),
+    (1280, 768),
+    (1344, 768), (1344, 704),
+    (1408, 704),
+    (1472, 704),
+    (1536, 640),
+    (1600, 640),
+    (1664, 576),
+    (1728, 576),
+)
+_SDXL_BUCKETS: tuple[tuple[int, int], ...] = tuple(
+    sorted({(w, h) for w, h in _SDXL_BUCKET_PAIRS} | {(h, w) for w, h in _SDXL_BUCKET_PAIRS})
+)
+
+
+def _snap_bucket(width: int, height: int) -> tuple[int, int]:
+    """Sanitize a requested size (>= 256, multiple of 8), then snap the pair to
+    the nearest SDXL training bucket (~1MP).
+
+    The distance is measured in log-space on aspect ratio and area; the area
+    term is down-weighted so ratio preservation wins when the request is far
+    from ~1MP (a plain equal-weight sum lets tiny area differences decide the
+    bucket). Off-bucket requests keep their intended aspect ratio while
+    staying at the ~1MP area SDXL was trained on. Returns (width, height).
+    """
+    w = max(256, round(width / 8) * 8)
+    h = max(256, round(height / 8) * 8)
+    if (w, h) in _SDXL_BUCKETS:
+        return w, h
+    return min(
+        _SDXL_BUCKETS,
+        key=lambda b: 2 * math.log((w / b[0]) / (h / b[1])) ** 2
+        + 0.1 * math.log((w * h) / (b[0] * b[1])) ** 2,
+    )
+
+
 def _edit_dim(v: int) -> int:
-    """Clamp an edit_image width/height. 0 = keep source size; any positive
-    value is rounded to a multiple of 8 and clamped to [256, 1024] (tiny inputs
-    such as 4 px land on the 256 px floor)."""
+    """Round an edit_image width/height. 0 = keep source size; any positive
+    value is rounded to a multiple of 8 (>= 256); the pair is later snapped to
+    an SDXL bucket by `_i2i_dims`."""
     if v <= 0:
         return 0
-    return max(256, min(1024, max(1, round(v / 8)) * 8))
+    return max(256, round(v / 8) * 8)
 
 
 def _i2i_dims(source_w: int, source_h: int, width: int, height: int):
     """Resolve target dimensions: explicit width/height, else source size,
-    clamped to [256, 1024] and rounded to multiples of 8."""
+    then snap the pair to the nearest SDXL bucket (~1MP)."""
     w = width or source_w
     h = height or source_h
-    scale = min(1.0, 1024.0 / max(w, h))
-    w = max(256, min(1024, int(round(w * scale / 8) * 8)))
-    h = max(256, min(1024, int(round(h * scale / 8) * 8)))
-    return w, h
+    return _snap_bucket(w, h)
 
 
 def _oom_retry(pipe, **kwargs):
@@ -1492,11 +1542,11 @@ def _build_server():
         ] = "",
         width: Annotated[
             int,
-            Field(description="Image width in px; rounded to a multiple of 8 and clamped to 256..1024."),
+            Field(description="Image width in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket (e.g. 1024x1024, 1152x896, 1344x768, 1536x640 and rotations)."),
         ] = W_DEFAULT,
         height: Annotated[
             int,
-            Field(description="Image height in px; rounded to a multiple of 8 and clamped to 256..1024."),
+            Field(description="Image height in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket."),
         ] = H_DEFAULT,
         num_inference_steps: Annotated[
             int,
@@ -1525,7 +1575,9 @@ def _build_server():
         """Parameters:
         - prompt: what to draw (English works best; be specific).
         - negative_prompt: things to avoid (e.g. "blurry, low quality").
-        - width/height: image size in pixels (multiple of 8, 256..1024).
+        - width/height: image size in pixels; any positive size is snapped to
+          the nearest SDXL ~1MP training bucket (multiple of 8, min 256,
+          e.g. 1024x1024, 1152x896, 1344x768 and rotations) for best quality.
         - num_inference_steps: 25-40 typical.
         - guidance_scale: how closely to follow the prompt (1..15, ~7.5 default).
         - seed: fixed seed for reproducibility, -1 = random.
@@ -1534,8 +1586,7 @@ def _build_server():
         Note: the server never writes files; the image is returned inline and the
         client saves it where it wants (identical in local and remote modes).
         """
-        width = max(256, min(1024, (round(width / 8) * 8)))
-        height = max(256, min(1024, (round(height / 8) * 8)))
+        width, height = _snap_bucket(width, height)
         steps = max(10, min(100, num_inference_steps))
 
         import asyncio
@@ -1594,11 +1645,11 @@ def _build_server():
         ] = 0.6,
         width: Annotated[
             int,
-            Field(description="Target width in px (rounded to a multiple of 8, clamped to 256..1024); 0 = keep the source size."),
+            Field(description="Target width in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket; 0 = keep the source size (also snapped)."),
         ] = 0,
         height: Annotated[
             int,
-            Field(description="Target height in px (rounded to a multiple of 8, clamped to 256..1024); 0 = keep the source size."),
+            Field(description="Target height in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket; 0 = keep the source size (also snapped)."),
         ] = 0,
         num_inference_steps: Annotated[
             int,
@@ -1705,7 +1756,8 @@ def _build_server():
         title="Server Status",
         description=(
             "Report the loaded image model, device, dtype, VRAM usage, weight "
-            "size, offload state and the number of concurrent render slots."
+            "size, offload state, the number of concurrent render slots and the "
+            "image-size policy (snap to SDXL ~1MP training buckets)."
         ),
     )
     async def server_status() -> str:
@@ -1726,7 +1778,10 @@ def _build_server():
             f"weights_gb={info.get('weights_gb')}\n"
             f"vram_gb={info.get('vram_gb')}\n"
             f"concurrency_slots={n_slots}\n"
-            f"load_seconds={info.get('load_seconds')}"
+            f"load_seconds={info.get('load_seconds')}\n"
+            f"size_policy=snap to SDXL ~1MP buckets (>=256, multiple of 8)\n"
+            f"snap_buckets={len(_SDXL_BUCKETS)} (SDXL ~1MP aspect-ratio buckets)\n"
+            f"native_size={W_DEFAULT}x{H_DEFAULT}"
         )
 
     @server.tool(
@@ -1824,6 +1879,15 @@ def _smoke_test() -> int:
                 pass
             else:
                 raise AssertionError(f"SSRF guard missed internal address {_bad}")
+        # SDXL bucket snapping sanity: exact buckets pass through, off-bucket
+        # sizes snap to the nearest official ~1MP bucket.
+        if _snap_bucket(1152, 896) != (1152, 896) or _snap_bucket(1024, 1024) != (1024, 1024):
+            raise AssertionError("exact SDXL buckets not preserved")
+        _snapped = _snap_bucket(512, 512)
+        if _snapped not in _SDXL_BUCKETS or max(_snapped) < 1024:
+            raise AssertionError(f"off-bucket 512x512 snapped to {_snapped}")
+        if _snap_bucket(1200, 900) != (1152, 896):
+            raise AssertionError(f"4:3-ish request snapped to {_snap_bucket(1200, 900)}")
         try:
             with _slot_ctx() as slot:
                 edited, seed2, _ = _image2image(

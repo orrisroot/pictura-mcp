@@ -307,7 +307,10 @@ other SDXL checkpoint (finetunes and derivatives included - just swap the
 (`exit 2`) when `PICTURA_MODEL` is not an SDXL-family checkpoint.
 
 Set `PICTURA_MODEL` in your client's server `env` (or the systemd env file), then
-restart/reconnect the client. Defaults: **1024×1024 / 30 steps**. On
+restart/reconnect the client. Defaults: **1024×1024 / 30 steps**. Requested
+sizes are snapped to the nearest SDXL training bucket (~1MP; e.g. 1024×1024,
+1152×896, 1344×768 and rotations) — SDXL was trained on these sizes, so
+off-bucket sizes (e.g. 512×512) produce tiled/duplicated patterns. On
 lower-VRAM cards the SDXL weights auto-fall back to CPU offload; CUDA-OOM at
 runtime also auto-offloads and retries.
 
@@ -325,7 +328,9 @@ runtime also auto-offloads and retries.
   To edit a local image against a remote server, upload it first with
   `POST /images/upload` to get a server image URL.
 - **`strength`** (0..1, default 0.6): higher = larger change
-- **`width`/`height`** (0 = keep source size; clamp ≤1024, multiple of 8)
+- **`width`/`height`** (0 = keep source size; any value is snapped to the
+  nearest SDXL ~1MP training bucket — including 0, so the output aspect can
+  differ slightly from a non-bucket source)
 
 Reuses loaded weights via `AutoPipelineForImage2Image.from_pipe` (no second
 model copy). `--smoke` also exercises the img2img path.

@@ -61,7 +61,7 @@ and arbitrary URLs or file paths are rejected.
 generate_image(
   prompt,                       # required; English works best
   negative_prompt = "",         # "blurry, low quality" etc.
-  width = 1024, height = 1024,  # SDXL default; clamps to [256,1024], multiple of 8
+  width = 1024, height = 1024,  # SDXL default; snapped to an SDXL ~1MP bucket
   num_inference_steps = 30,     # clamps to [10,100]
   guidance_scale = 7.5,
   seed = -1,                    # -1 = random
@@ -77,7 +77,7 @@ edit_image(
   image,                        # required: http(s) URL, or file path (stdio/local)
   negative_prompt = "",
   strength = 0.6,               # 0..1; higher = bigger change
-  width = 0, height = 0,        # 0 = keep source size, clamp ≤1024
+  width = 0, height = 0,        # 0 = keep source size; else snapped to an SDXL ~1MP bucket
   num_inference_steps = 25,
   guidance_scale = 7.5,
   seed = -1,
@@ -131,7 +131,11 @@ and steers the edit; it is **SDXL-only**.
   local stdio run a host file path / `file://` URI is also accepted; over
   http/sse the server never reads host files. The tool schema shows which
   mode applies.
-- Sizes must be multiples of 8 within [256, 1024].
+- Sizes: any requested width/height is snapped to the nearest SDXL training
+  bucket (~1MP, multiples of 8) — matching a bucket keeps quality; off-bucket
+  sizes (e.g. 512×512) cause tiled/duplicated patterns.
+  With `width=0`/`height=0` the source size is snapped too, so the output
+  aspect can differ slightly from a non-bucket source.
 - **Privacy**: never write the user's prompt into log files, notes, or other
   persistent text.
 - On errors, report the returned error text verbatim to the user.

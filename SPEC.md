@@ -56,8 +56,8 @@ Text-to-image.
 |---|---|---|---|
 | `prompt` | string | — | required |
 | `negative_prompt` | string | `""` | |
-| `width` | int | model-aware (1024 for SDXL, 512 else) | clamped to [256, 1024], multiple of 8 |
-| `height` | int | model-aware | clamped to [256, 1024], multiple of 8 |
+| `width` | int | model-aware (1024 for SDXL, 512 else) | any positive value is snapped to the nearest SDXL ~1MP training bucket (min 256, multiple of 8) |
+| `height` | int | model-aware | any positive value is snapped to the nearest SDXL ~1MP training bucket |
 | `num_inference_steps` | int | 30 | clamped to [10, 100] |
 | `guidance_scale` | float | 7.5 | |
 | `seed` | int | -1 | -1 = random |
@@ -72,7 +72,7 @@ Edits an existing image with a prompt (img2img).
 | `image` | string | — | required. Source image: an `http(s)://` URL — a server image URL (`http://<host>/images/<id>` from `generate_image` / `edit_image` / `POST /images/upload`, resolved from the in-memory cache) or an external image URL (fetched server-side, SSRF-guarded). On a local stdio run a host file path / `file://` URI is also accepted; over http/sse the server reads no host files |
 | `negative_prompt` | string | `""` | |
 | `strength` | float | 0.6 | 0..1, higher = more change |
-| `width` / `height` | int | 0 | 0 = keep source size; clamped to [256, 1024], multiple of 8 |
+| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value is snapped to the nearest SDXL ~1MP training bucket (min 256, multiple of 8) |
 | `num_inference_steps` | int | 25 | effective steps ≈ `steps × strength` |
 | `guidance_scale` | float | 7.5 | |
 | `seed` | int | -1 | -1 = random |
@@ -89,7 +89,9 @@ guidance. **No model identifiers are exposed** (they stay server-side).
 
 ### `server_status`
 Reports `model`, `device`, `dtype`, `offload`, `weights_gb`, `vram_gb`,
-`concurrency_slots`, `load_seconds`.
+`concurrency_slots`, `load_seconds`, `size_policy` (snap to SDXL ~1MP buckets,
+≥256, multiple of 8), `snap_buckets` (number of SDXL ~1MP buckets) and
+`native_size`.
 
 **All tools return**: over **stdio** an `ImageContent` (base64 PNG, mime
 `image/png`) + a `TextContent` note; over **http/sse** a single `TextContent`
@@ -111,6 +113,9 @@ note containing a short-lived download URL (`http://<base>/images/<id>`, TTL
 | Model | Default W×H | Default steps |
 |---|---|---|
 | SDXL (required) | 1024×1024 | 30 |
+
+Requested sizes are snapped to the SDXL training buckets (~1MP), so output
+always stays on the aspect/area combinations the model was trained on.
 
 ### Memory strategy (low VRAM)
 1. fp16 weights loaded; attention slicing + VAE slicing + VAE tiling enabled.
@@ -242,6 +247,10 @@ above the ~1.6 MB outputs and typical camera JPEGs. Raise
 `PICTURA_MAX_BODY_MB` / `--max-body-mb` only if you really pass very large
 sources. Stdio (local) has no body cap.
 
+Generation and edit sizes stay at the native-bucket level (~1MP), so compute
+and memory do not depend on the requested aspect ratio (e.g. 1536×640 costs
+about the same as 1024×1024).
+
 ---
 
 ## 8. Client configuration (any MCP client)
@@ -320,6 +329,10 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
   `--max-body-mb`).
 - Remote with token: 401 on missing/wrong token; `POST /images/upload` +
   `GET /images/<id>` round-trip OK; initialize + tools/list OK.
+- Bucket snapping (GPU): `generate_image(1152×896)` outputs 1152×896;
+  `generate_image(512×512)` snaps to 960×1024; the generated download URL
+  feeds `edit_image` directly (same bucket). `server_status` reports the
+  new `size_policy` / `snap_buckets` / `native_size` fields.
 - Statelessness: `outputs/` unchanged after generation via MCP.
 
 ---
