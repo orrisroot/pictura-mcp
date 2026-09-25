@@ -33,6 +33,8 @@ URL image return (http/sse only):
                                   (default 600)
     PICTURA_IMAGE_URL_MAX            max cached images (default 64)
     PICTURA_IMAGE_URL_MAX_MB         max total cache bytes (default 512)
+    PICTURA_MAX_BODY_MB            max HTTP request/upload body + external image
+                                  fetch cap for http/sse (default 16)
 
 Client-supplied `lora` ids are restricted to a built-in default allowlist
 (override via PICTURA_LORA_ALLOWLIST); URLs/local paths are rejected and weights
@@ -41,24 +43,31 @@ load safetensors-only. ControlNet is exposed as an abstract `control_type`
 from an internal allowlist (PICTURA_CONTROLNET_ALLOWLIST). Allowlisted models are
 pre-downloaded into the cache at service startup.
 
-`edit_image` reads host image paths only on a local stdio run; over http/sse it
-accepts only in-memory data:image/...;base64,... URIs, so the server never
-touches the remote host's filesystem.
+`edit_image` takes an http(s) URL for the source image - a short-lived server
+image URL (from generate_image / edit_image / POST /images/upload) or an
+external image URL (fetched server-side with an SSRF guard). It reads host
+image paths only on a local stdio run; over http/sse the server never touches
+the remote host's filesystem.
+
+Source images can also be uploaded with `POST /images/upload` (http/sse only,
+API-key protected): send the raw image bytes in the request body and the
+response is a short-lived `http://<base>/images/<id>` URL that `edit_image`
+accepts and that GET /images/<id> can serve back.
 
 Images are never written to disk. On stdio the result is returned inline as
 base64 (ImageContent); over http/sse the result is a short-lived download URL
-(system the image sits in an in-memory cache, TTL-bound, and the client saves
-it — server and client may not share a filesystem).
+(the image sits in an in-memory cache, TTL-bound, and the client saves it —
+server and client may not share a filesystem).
 
 Transports / remote access (CLI):
     --transport stdio|http|sse   default stdio (spawned by the MCP client)
     --host <host>                bind address for http/sse (default: $PICTURA_HOST or 127.0.0.1)
     --port <port>                TCP port for http/sse (default: $PICTURA_PORT or 8000)
     --max-body-mb <MB>           max HTTP request body for http/sse (default 16)
-                                 Img2img base64 image input is sent in the body;
-                                 16 MB body ≈ 12 MB image, ample for typical
-                                 ~1.6 MB outputs and camera JPEGs. Raise only if
-                                 you really need to pass very large images.
+                                 caps image uploads (POST /images/upload) and
+                                 external image fetches; 16 MB is ample for
+                                 typical images and ~1.6 MB outputs. Raise only
+                                 if you need to pass very large images.
     --api-key <key>              require the API key on http/sse: clients send it via
                                  the PICTURA_API_KEY header
     --log-file <path>            append [pictura-mcp] logs to a file (default: stderr)
@@ -74,13 +83,18 @@ from __future__ import annotations
 
 import base64
 import io
+import ipaddress
 import logging
 import os
 import random
+import re
 import secrets
+import socket
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated
@@ -183,8 +197,10 @@ if CACHE_DIR:
 # --------------------------------------------------------------------------
 # Over http/sse each generated image is stored in an in-memory cache for a
 # short TTL and the tool result returns an unguessable download URL (server
-# and client may not share a filesystem). Images are never written to disk:
-# the cache lives only in RAM and vanishes with the process.
+# and client may not share a filesystem). The same cache backs POST
+# /images/upload and the server-image URLs that edit_image accepts. Images are
+# never written to disk: the cache lives only in RAM and vanishes with the
+# process.
 _URL_TTL = float(_env("PICTURA_IMAGE_URL_TTL", "600") or 600)
 _URL_MAX = max(1, int(_env("PICTURA_IMAGE_URL_MAX", "64") or 64))
 _URL_MAX_BYTES = max(
@@ -197,6 +213,17 @@ _PUBLIC_BASE = (_env("PICTURA_PUBLIC_URL") or "").strip().rstrip("/") or None
 # uvicorn --forwarded-allow-ips: peers whose X-Forwarded-* headers are trusted
 # (reverse proxies on the same host are trusted by default).
 _FWD_ALLOW_IPS = (_env("PICTURA_FORWARDED_ALLOW_IPS") or "127.0.0.1").strip()
+
+# HTTP request-body cap (MB) for http/sse: bounds POST /images/upload bodies
+# and external image fetches. CLI --max-body-mb overrides at startup.
+_DEFAULT_MAX_BODY_MB = max(1, int(_env("PICTURA_MAX_BODY_MB", "16") or 16))
+_MAX_BODY_BYTES = _DEFAULT_MAX_BODY_MB * 1024 * 1024
+# Timeout / hop limits for fetching external source images in edit_image.
+_FETCH_TIMEOUT = 30
+_FETCH_MAX_HOPS = 5
+# Decoder guard: refuses to decode images above this pixel count (protects
+# against decompression bombs) when loading from uploads / fetched bytes.
+_IMAGE_MAX_PIXELS = 40_000_000
 
 
 class _ImageCache:
@@ -659,40 +686,222 @@ def _ensure_i2i(slot):
 
 # Whether edit_image may read server-side file paths / file:// URIs.
 # Fixed policy: allowed only when the client is local (stdio) - remote
-# (http/sse) stays data-URI-only (secure default). Set in main() from transport.
+# (http/sse) never reads host files. Set in main() from the transport.
 _ALLOW_HOST_PATHS = False
 
 
-def _load_source_image(image_src: str):
+_IMAGE_REF_RE = re.compile(r"(?:https?://[^/?#]+)?/images/([A-Za-z0-9_-]+)")
+
+
+def _image_id_from_reference(src: str) -> str | None:
+    """Extract an in-memory cache id from an /images/<id> reference (absolute
+    or relative). Whether the reference actually points at this server is
+    decided by `_is_own_image_reference`."""
+    m = _IMAGE_REF_RE.fullmatch(src)
+    return m.group(1) if m else None
+
+
+def _norm_http_origin(base: str | None) -> str | None:
+    """Normalize a base URL / URL to `scheme://host[:port]` (lowercased host,
+    default ports stripped), or None when unusable."""
+    if not base:
+        return None
+    if "://" not in base:
+        base = f"http://{base}"
+    try:
+        p = urllib.parse.urlsplit(base)
+        port = p.port
+    except ValueError:
+        return None
+    if p.scheme not in ("http", "https") or not p.hostname or p.username or p.password:
+        return None
+    host = p.hostname.lower()
+    if port is None or port == (443 if p.scheme == "https" else 80):
+        port_part = ""
+    else:
+        port_part = f":{port}"
+    return f"{p.scheme}://{host}{port_part}"
+
+
+def _is_own_image_reference(src: str, server_origins: frozenset) -> bool:
+    """True when src is an /images/<id> reference served by this server.
+
+    A relative reference (`/images/<id>`) is always ours; a full URL only
+    counts as a server image when its origin matches a known server base
+    (PICTURA_PUBLIC_URL / bind host:port / the requesting client's Host).
+    Anything else falls through to external-URL handling, so an external
+    URL whose path merely looks like `/images/<token>` is still fetched.
+    """
+    if _image_id_from_reference(src) is None:
+        return False
+    if not src.startswith(("http://", "https://")):
+        return True  # relative reference
+    origin = _norm_http_origin(src)
+    return origin is not None and origin in server_origins
+
+
+def _decode_image_rgb(data: bytes):
+    """Decode raw bytes as a raster image, rejecting decompression bombs."""
+    from PIL import Image as PILImage
+
+    img = PILImage.open(io.BytesIO(data))
+    if img.size[0] * img.size[1] > _IMAGE_MAX_PIXELS:
+        raise ValueError("image dimensions too large")
+    return img.convert("RGB")
+
+
+def _ip_is_blocked(address) -> bool:
+    """True when an IP is loopback / private / link-local / reserved / etc."""
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if (
+        address.is_unspecified
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_private
+    ):
+        return True
+    if isinstance(address, ipaddress.IPv4Address):
+        # Carrier-grade NAT 100.64.0.0/10 (not always flagged private).
+        if (int(address) & 0xFFC00000) == 0x64400000:
+            return True
+    return False
+
+
+def _assert_ssrf_safe(url_str: str) -> None:
+    """Reject URLs that would make the server fetch internal/private targets.
+
+    External URLs in `edit_image` are fetched by the server, which would
+    otherwise be an SSRF vector (the server could be pointed at localhost,
+    cloud metadata, or other internal hosts). Only public http(s) hosts pass.
+    """
+    parsed = urllib.parse.urlsplit(url_str)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"refusing to fetch non-http(s) URL: {parsed.scheme!r}")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs with embedded credentials are not allowed")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL has no host")
+    try:
+        infos = socket.getaddrinfo(
+            host,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except (socket.gaierror, ValueError) as e:
+        raise ValueError(f"cannot resolve host {host!r}") from e
+    if not infos:
+        raise ValueError(f"cannot resolve host {host!r}")
+    for info in infos:
+        sockaddr = info[4][0]
+        try:
+            address = ipaddress.ip_address(sockaddr)
+        except ValueError as e:
+            raise ValueError(f"cannot parse address {sockaddr!r}") from e
+        if _ip_is_blocked(address):
+            raise ValueError(
+                f"refusing to fetch internal/private address {sockaddr} "
+                f"(host {host!r})"
+            )
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Let the fetcher control redirects so every hop is SSRF-checked."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_URL_OPENER = urllib.request.build_opener(_NoRedirect())
+_URL_OPENER.addheaders = [("User-Agent", "pictura-mcp/0.1"), ("Accept", "image/*")]
+
+
+def _fetch_external_image(url_str: str) -> bytes:
+    """Fetch an external http(s) image with an SSRF guard and a size cap."""
+    current = url_str
+    for _hop in range(_FETCH_MAX_HOPS + 1):
+        _assert_ssrf_safe(current)
+        try:
+            with _URL_OPENER.open(current, timeout=_FETCH_TIMEOUT) as resp:
+                data = resp.read(_MAX_BODY_BYTES + 1)
+        except urllib.error.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308):
+                # Redirects are surfaced as HTTPError by the no-redirect
+                # opener; follow each hop after re-running the SSRF check.
+                location = e.headers.get("Location")
+                if not location:
+                    raise ValueError("redirect without a Location header") from None
+                current = urllib.parse.urljoin(current, location)
+                continue
+            raise ValueError(f"fetch failed: HTTP {e.code}") from None
+        except OSError as e:
+            raise ValueError(f"fetch failed: {e}") from None
+        if len(data) > _MAX_BODY_BYTES:
+            raise ValueError(
+                f"remote image exceeds the {_MAX_BODY_BYTES // (1024 * 1024)} MB limit"
+            )
+        return data
+    raise ValueError("too many redirects")
+
+
+def _load_source_image(image_src: str, server_origins: frozenset = frozenset()):
     """Load the edit_image source image.
 
     Accepted:
-      - a data:image/...;base64,... URI (always - portable across machines);
+      - a server-hosted image reference `/images/<id>` or
+        `http(s)://<server-origin>/images/<id>` (in-memory cache lookup - e.g.
+        a previous generate_image / edit_image result, or a /images/upload
+        upload). Only full URLs whose origin matches a known server base are
+        resolved from the cache; other /images-shaped URLs are treated as
+        external.
+      - an external `http(s)://` image URL (fetched server-side, SSRF-guarded);
       - a local file path or file:// URI, but only when host-path reads are
         enabled for this run (local stdio client by default). Over http/sse
         the server never reads host files - that removes the
         data-exfiltration vector for remote deployments.
     """
-    from PIL import Image as PILImage
-
     src = image_src.strip()
-    if src.startswith("data:"):
-        _meta, b64 = src.split(",", 1)
-        return PILImage.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+    if not src:
+        raise ValueError("image is empty")
+
+    img_id = _image_id_from_reference(src)
+    if img_id is not None and _is_own_image_reference(src, server_origins):
+        data = _img_cache.get(img_id)
+        if data is None:
+            raise ValueError(
+                "image not found or expired - server image URLs are short-lived; "
+                "upload it again (POST /images/upload) or regenerate it"
+            )
+        return _decode_image_rgb(data)
+
+    if src.startswith(("http://", "https://")):
+        data = _fetch_external_image(src)
+        try:
+            return _decode_image_rgb(data)
+        except Exception as e:  # noqa: BLE001 - not a usable image
+            raise ValueError(f"fetched URL is not a valid image: {e}") from e
+
     if _ALLOW_HOST_PATHS:
         if src.startswith("file://"):
             src = src[len("file://"):]
         try:
+            from PIL import Image as PILImage
             return PILImage.open(src).convert("RGB")
         except FileNotFoundError:
             raise FileNotFoundError(
-                f"image not found: {src} (pass a local file path, a file:// URI, "
-                "or a data: URI)"
+                f"image not found: {src} (pass an http(s) image URL or, on a "
+                "local stdio run, a host file path or file:// URI)"
             )
+
     raise ValueError(
-        "image must be a data:image/...;base64,... URI (server-side file paths "
-        "and file:// URIs are not accepted over http/sse - the server never "
-        "reads host files remotely)"
+        "image must be an http(s) URL - a server image URL "
+        "(http://<host>/images/<id> from generate_image / edit_image / "
+        "POST /images/upload) or an external image URL. Server host file paths "
+        "are only accepted on a local stdio run - over http/sse the server "
+        "never reads host files."
     )
 
 
@@ -1071,11 +1280,12 @@ def _image2image(
     lora_spec: str = "",
     control_type: str = "",
     control_scale: float = 1.0,
+    server_origins: frozenset = frozenset(),
 ):
     import torch
     from PIL import Image as PILImage
 
-    source = image if isinstance(image, PILImage.Image) else _load_source_image(image)
+    source = image if isinstance(image, PILImage.Image) else _load_source_image(image, server_origins)
     w, h = _i2i_dims(*source.size, width, height)
     if (w, h) != source.size:
         source = source.resize((w, h), PILImage.LANCZOS)
@@ -1132,29 +1342,33 @@ def _finalize_result(image, actual_seed: int, t0: float, prefix: str = "img") ->
     return data, b64, round(time.time() - t0, 1), name
 
 
-def _request_base(ctx) -> str | None:
-    """Externally visible base URL of the current HTTP request.
+def _host_base(req) -> str | None:
+    """Externally visible base URL of an HTTP request, None when unusable.
 
-    Builds image download URLs when PICTURA_PUBLIC_URL is not set: a
-    reverse proxy forwards the public Host (and with uvicorn's proxy headers
-    the X-Forwarded-Proto / X-Forwarded-Host), so the resulting URL is
-    reachable by the client. None for stdio or when no request is available;
-    wildcard Host values (0.0.0.0 / ::) are rejected - such URLs are not
-    reachable, so the caller falls back (bind address, then inline).
+    A reverse proxy forwards the public Host (and with uvicorn's proxy headers
+    the X-Forwarded-Proto / X-Forwarded-Host), so the resulting base is
+    reachable by the client. Wildcard bind hosts (0.0.0.0 / ::) yield no
+    reachable base and return None.
     """
+    if req is None:
+        return None
+    try:
+        host = getattr(req.base_url, "hostname", None)
+        if host in ("0.0.0.0", "::", "", None):
+            return None
+        return str(req.base_url).rstrip("/") or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _request_base(ctx) -> str | None:
+    """Base URL of the current MCP request (see _host_base). None for stdio."""
     if ctx is None:
         return None
     try:
-        req = ctx.request_context.request
-        if req is not None:
-            host = getattr(req.base_url, "hostname", None)
-            if host in ("0.0.0.0", "::", "", None):
-                return None
-            url = str(req.base_url).rstrip("/")
-            return url or None
+        return _host_base(ctx.request_context.request)
     except Exception:  # noqa: BLE001 - missing context / non-HTTP transport
-        pass
-    return None
+        return None
 
 
 def _image_result(
@@ -1205,33 +1419,39 @@ def _image_result(
 # --------------------------------------------------------------------------
 
 # edit_image source-image wording. Chosen at server-build time from
-# _ALLOW_HOST_PATHS (stdio/local = paths allowed; http/sse = data URI only).
+# _ALLOW_HOST_PATHS (stdio/local = host paths allowed; http/sse = URLs only).
 # Module-level constants because tool annotations are stringified (postponed
 # evaluation) and must resolve against module globals - enclosing locals are
 # not visible to inspect.signature(eval_str=True).
 _EDIT_IMAGE_DESC_LOCAL = (
     "Transform an existing image using a text prompt (img2img). Pass the "
-    "source as a local file path (server host), a file:// URI, or a "
-    "data:image/...;base64,... URI. In stdio mode the result is the edited "
-    "image inline as base64 PNG (ImageContent); over http/sse the result note "
-    "contains a short-lived download URL - the client fetches and saves it. "
-    "Nothing is written to the server disk."
+    "source as an http(s) URL - a short-lived server image URL (from "
+    "generate_image / edit_image / the POST /images/upload endpoint) or an "
+    "external image URL (private/loopback addresses are refused) - or a local "
+    "file path / file:// URI (this is a local stdio run). In stdio mode the "
+    "result is the edited image inline as base64 PNG (ImageContent); over "
+    "http/sse the result note contains a short-lived download URL - the "
+    "client fetches and saves it. Nothing is written to the server disk."
 )
 _EDIT_IMAGE_DESC_REMOTE = (
     "Transform an existing image using a text prompt (img2img). Pass the "
-    "source as a data:image/...;base64,... URI (server-side file paths "
-    "and file:// URIs are NOT accepted - the server never reads host "
-    "files over http/sse). The result note contains a short-lived download "
-    "URL - the client fetches and saves it. Nothing is written to disk."
+    "source as an http(s) URL - a short-lived server image URL (from "
+    "generate_image / edit_image / the POST /images/upload endpoint) or an "
+    "external image URL (private/loopback addresses are refused). The result "
+    "note contains a short-lived download URL - the client fetches and saves "
+    "it. Nothing is written to the server disk."
 )
 _IMG_FIELD_DESC_LOCAL = (
-    "Source image: a local file path (server host), a file:// URI, or a "
-    "data:image/...;base64,... URI (this is a local stdio run)."
+    "Source image: an http(s) URL - a server image URL (http://<host>/images/<id> "
+    "from generate_image / edit_image / POST /images/upload) or an external image "
+    "URL (private/loopback addresses are refused) - or a local file path / "
+    "file:// URI (this is a local stdio run)."
 )
 _IMG_FIELD_DESC_REMOTE = (
-    "Source image as a data:image/...;base64,... URI. Server-side file "
-    "paths and file:// URIs are not accepted over http/sse - the server "
-    "never reads host files."
+    "Source image: an http(s) URL - a server image URL (http://<host>/images/<id> "
+    "from generate_image / edit_image / POST /images/upload) or an external "
+    "image URL (private/loopback addresses are refused). Server host file paths "
+    "are not accepted over http/sse."
 )
 
 
@@ -1441,6 +1661,18 @@ def _build_server():
                 asyncio.run_coroutine_threadsafe(ctx.report_progress(step, eff_steps), loop)
 
         t0 = time.time()
+        # Origins that count as "this server" for resolving /images/<id>
+        # source references: PICTURA_PUBLIC_URL, the requesting client's Host,
+        # and the bind address (PICTURA_HOST/PICTURA_PORT).
+        server_origins = frozenset(
+            o
+            for o in (
+                _norm_http_origin(_PUBLIC_BASE),
+                _norm_http_origin(_request_base(ctx)),
+                _norm_http_origin(_URL_BASE),
+            )
+            if o
+        )
         try:
             edited, actual_seed, _eff = await asyncio.to_thread(
                 _run_on_slot,
@@ -1458,6 +1690,7 @@ def _build_server():
                 lora,
                 control_type,
                 control_scale,
+                server_origins=server_origins,
             )
         except Exception as e:
             return [
@@ -1559,18 +1792,38 @@ def _smoke_test() -> int:
         _log(f"Smoke test OK: saved {out} (seed={seed}), slots={len(_slots)}, info={_slots[0].info}")
 
         # img2img check: reuse the generated image. On a local (stdio/smoke)
-        # run host file paths are allowed, so pass the saved path; also assert
-        # the portable data: URI loads.
+        # run host file paths are allowed; server image URLs (relative and
+        # absolute) resolve from the in-memory cache, and the SSRF guard
+        # rejects internal addresses (IP literals need no network).
         import io as _io
-        import base64 as _b64
 
         _buf = _io.BytesIO()
         image.save(_buf, format="PNG")
-        _src_uri = "data:image/png;base64," + _b64.b64encode(_buf.getvalue()).decode("ascii")
-        if _load_source_image(_src_uri).size != (256, 256):
-            raise AssertionError("data URI load mismatch")
+        _png = _buf.getvalue()
         if not _ALLOW_HOST_PATHS or _load_source_image(str(out)).size != (256, 256):
             raise AssertionError("host path load mismatch (local run should allow paths)")
+        _sid = _img_cache.put(_png)
+        if _sid is None or _load_source_image(f"/images/{_sid}").size != (256, 256):
+            raise AssertionError("server image URL (relative) load mismatch")
+        _own = frozenset({_norm_http_origin(_URL_BASE) or "http://own"})
+        if _load_source_image(f"http://own/images/{_sid}", server_origins=_own).size != (256, 256):
+            raise AssertionError("server image URL (matching origin) load mismatch")
+        # An /images-shaped URL on a foreign origin must NOT resolve from the
+        # cache - it is treated as an external fetch. A private IP is used so
+        # the SSRF guard rejects it without any network access.
+        try:
+            _load_source_image(f"http://10.0.0.9/images/{_sid}", server_origins=_own)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("foreign-origin /images URL was resolved from the cache")
+        for _bad in ("http://127.0.0.1/", "http://10.0.0.1/", "http://[::1]/"):
+            try:
+                _assert_ssrf_safe(_bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"SSRF guard missed internal address {_bad}")
         try:
             with _slot_ctx() as slot:
                 edited, seed2, _ = _image2image(
@@ -1634,6 +1887,10 @@ def main() -> int:  # noqa: C901
         help="append [pictura-mcp] logs to a file (default: stderr / journald)",
     )
     args = parser.parse_args()
+    # Keep the module-level body cap in sync with the CLI flag: it bounds
+    # POST /images/upload bodies and external image fetches.
+    global _MAX_BODY_BYTES
+    _MAX_BODY_BYTES = args.max_body_mb * 1024 * 1024
     if not IS_XL:
         print(
             f"[pictura-mcp] PICTURA_MODEL={MODEL_ID!r} is not an SDXL-family "
@@ -1670,7 +1927,7 @@ def main() -> int:  # noqa: C901
     if _ALLOW_HOST_PATHS:
         _log("edit_image: host file paths allowed (local stdio run)")
     else:
-        _log("edit_image: host file paths disabled (http/sse) - data: URIs only")
+        _log("edit_image: host file paths disabled (http/sse) - image URL sources only")
     # logrotate support: reopen the configured log file on SIGHUP.
     try:
         import signal
@@ -1714,16 +1971,36 @@ def _auth_ok(request, token: str | None) -> bool:
     return request.headers.get("pictura_api_key") == token
 
 
-def _attach_http_middleware(mcp_app, token: str | None):
-    """Add GET /images/{img_id} and the API-key check to the MCP app.
+def _encode_upload(body: bytes):
+    """Decode an uploaded image and normalize it to a PNG byte blob."""
+    try:
+        img = _decode_image_rgb(body)
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001 - not a usable image
+        raise ValueError(f"not a valid image: {e}") from e
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue(), img.size[0], img.size[1]
+
+
+def _attach_http_middleware(
+    mcp_app, token: str | None, max_body_bytes: int = _MAX_BODY_BYTES
+):
+    """Add GET /images/{id}, POST /images/upload and the API-key check.
 
     Applied as middleware ON the MCP app itself, and uvicorn runs that app as
     the top-level ASGI app, so the MCP session manager's lifespan (task-group
     init) still runs. Wrapping the app in another Starlette app with Mount
     would skip that lifespan and crash with "Task group is not initialized".
 
-    The image id is an unguessable secret, so the URL itself is the capability
-    (valid for the short cache TTL; no additional auth).
+    - GET /images/<id> serves a cached image; the id is an unguessable secret,
+      so the URL itself is the capability (valid for the short cache TTL, no
+      additional auth).
+    - POST /images/upload accepts raw image bytes and registers the image in
+      the same in-memory cache, returning a short-lived /images/<id> URL that
+      edit_image accepts (and GET can serve back). Uploads are API-key
+      protected (unlike GET, which is capability-based).
     """
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse, Response
@@ -1735,7 +2012,34 @@ def _attach_http_middleware(mcp_app, token: str | None):
             return JSONResponse({"error": "image not found or expired"}, status_code=404)
         return Response(content=data, media_type="image/png")
 
+    async def _upload_image(request):
+        import asyncio
+
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > max_body_bytes:
+                return JSONResponse({"error": "request body too large"}, status_code=413)
+        if not body:
+            return JSONResponse({"error": "empty body - send image bytes"}, status_code=400)
+        try:
+            png, w, h = await asyncio.to_thread(_encode_upload, body)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        img_id = _img_cache.put(png)
+        if img_id is None:
+            return JSONResponse({"error": "image cache full - try again later"}, status_code=503)
+        base = _PUBLIC_BASE or _host_base(request) or _URL_BASE
+        url = f"{base}/images/{img_id}" if base else f"/images/{img_id}"
+        return JSONResponse(
+            {"image": url, "ttl": int(_img_cache.ttl), "width": w, "height": h}
+        )
+
     async def _dispatch(request, call_next):
+        if request.method == "POST" and request.url.path == "/images/upload":
+            if not _auth_ok(request, token):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await _upload_image(request)
         if request.url.path.startswith("/images/"):
             return await _serve_image(request)
         if not _auth_ok(request, token):
@@ -1767,16 +2071,18 @@ def _run_http_server(
         )
         path = "/mcp"
 
-    _attach_http_middleware(mcp_app, token)
+    _attach_http_middleware(mcp_app, token, max_body_bytes)
     if token:
         _log(
             f"MCP {transport} server: http://{host}:{port}{path} "
-            f"(auth: API key, max body {max_body_bytes // (1024 * 1024)} MB)"
+            f"(auth: API key, max body {max_body_bytes // (1024 * 1024)} MB, "
+            f"upload POST /images/upload)"
         )
     else:
         _log(
             f"MCP {transport} server: http://{host}:{port}{path} "
-            f"(NO auth - only for trusted LAN, max body {max_body_bytes // (1024 * 1024)} MB)"
+            f"(NO auth - only for trusted LAN, max body {max_body_bytes // (1024 * 1024)} MB, "
+            f"upload POST /images/upload)"
         )
 
     uvicorn.run(

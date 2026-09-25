@@ -69,7 +69,7 @@ Edits an existing image with a prompt (img2img).
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `prompt` | string | — | required |
-| `image` | string | — | required. Source image: local file path / `file://` URI (local stdio run only) or `data:image/...;base64,...` URI (everywhere, portable). Over http/sse only `data:` URIs are accepted — the server reads no host files |
+| `image` | string | — | required. Source image: an `http(s)://` URL — a server image URL (`http://<host>/images/<id>` from `generate_image` / `edit_image` / `POST /images/upload`, resolved from the in-memory cache) or an external image URL (fetched server-side, SSRF-guarded). On a local stdio run a host file path / `file://` URI is also accepted; over http/sse the server reads no host files |
 | `negative_prompt` | string | `""` | |
 | `strength` | float | 0.6 | 0..1, higher = more change |
 | `width` / `height` | int | 0 | 0 = keep source size; clamped to [256, 1024], multiple of 8 |
@@ -156,15 +156,19 @@ python server/pictura_server.py [options]
 | `--host` | `127.0.0.1` | bind address (use `0.0.0.0` for remote) |
 | `--port` | `8000` | TCP port |
 | `--api-key <key>` | none | require the API key (http/sse) via the `PICTURA_API_KEY` header |
-| `--max-body-mb <n>` | 16 | max HTTP request body (http/sse); base64 image input lives here |
+| `--max-body-mb <n>` | 16 | max HTTP request body (http/sse); bounds image uploads and external image fetches |
 | `--smoke` | — | self-test (txt2img + img2img) writing to `<repo>/outputs/` |
 
 - http → endpoint `/mcp` (streamable HTTP, JSON responses)
 - sse → endpoint `/sse`
-- **Image downloads**: `GET /images/<id>` serves cached generated images
-  (see §1 / §6). Set `PICTURA_PUBLIC_URL` when binding `0.0.0.0` or behind
-  NAT / a reverse proxy so the URLs returned to clients are reachable; without
-  it the server falls back to inline returns with a warning.
+- **Image upload**: `POST /images/upload` accepts raw image bytes (API-key
+  protected, body capped by `--max-body-mb`) and returns a short-lived
+  `http://<base>/images/<id>` URL; the image is stored in the same in-memory
+  TTL cache and served back by `GET /images/<id>`.
+- **Image downloads**: `GET /images/<id>` serves cached generated / uploaded
+  images (see §1 / §6). Set `PICTURA_PUBLIC_URL` when binding `0.0.0.0` or
+  behind NAT / a reverse proxy so the URLs returned to clients are reachable;
+  without it the server falls back to inline returns with a warning.
 - **Image return mode**: stdio → inline base64; http/sse → short-lived URL
   (URL only; no inline bytes), unless no public base is resolvable (falls back
   to inline).
@@ -181,16 +185,24 @@ python server/pictura_server.py [options]
 - **Privacy**: user prompts and tool arguments are **never written to logs**
   (by design; `_log` only receives internal status text, and framework loggers
   are capped at WARNING so request data is not emitted).
-- Input images (data URIs) are decoded in memory only; not retained.
+- Input images (uploaded bytes or fetched URLs) are decoded in memory only;
+  not retained.
 - **`edit_image` reads host files only on a local stdio run**: over http/sse,
-  `edit_image` accepts source images only as `data:image/...;base64,...` URIs —
-  server-side file paths / `file://` URIs are rejected outright (a
-  `ValueError`), so a remote client cannot point the server at an arbitrary
-  host file. A local (stdio) run may read paths because the client is on the
-  same host and already trusted with the filesystem.
-- **Image URLs are capability links**: each generated-image URL embeds an
-  unguessable id (192-bit random) and expires after `PICTURA_IMAGE_URL_TTL`;
+  `edit_image` accepts source images as `http(s)://` URLs — a server image URL
+  or an external image URL. Server-side file paths / `file://` URIs are
+  rejected outright (a `ValueError`), so a remote client cannot point the
+  server at an arbitrary host file. A local (stdio) run may read paths because
+  the client is on the same host and already trusted with the filesystem.
+- **External fetches are SSRF-guarded**: URLs must be `http(s)` and resolve to
+  public addresses only (loopback / private / link-local / reserved / CGNAT
+  ranges are refused); every redirect hop is re-checked; fetches are bounded by
+  `--max-body-mb` and a 30 s timeout. Server `/images/<id>` URLs resolve from
+  the in-memory cache without network.
+- **Image URLs are capability links**: each generated/uploaded-image URL embeds
+  an unguessable id (192-bit random) and expires after `PICTURA_IMAGE_URL_TTL`;
   images are cached in RAM only (never on disk) and vanish with the process.
+  `POST /images/upload` requires the API key when configured (unlike
+  `GET /images/<id>`, which is capability-based).
 - No output-directory control is offered: tools accept no output path and the
   server never persists images.
 
@@ -216,7 +228,7 @@ python server/pictura_server.py [options]
 | `PICTURA_IMAGE_URL_MAX_MB` | `512` | max total bytes of the URL cache |
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
-| `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse |
+| `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse; bounds image uploads and external image fetches |
 | `PICTURA_API_KEY` | unset | API key; clients send it in the `PICTURA_API_KEY` header; fallback when `--api-key` not given |
 | `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
@@ -224,12 +236,11 @@ python server/pictura_server.py [options]
 
 ## 7. Size limits (image input)
 
-Base64 images arrive inside the HTTP request body, so `--max-body-mb` governs.
-Default is **16 MB ≈ 12 MB actual image** — plenty of headroom over the ~1.6 MB
-outputs and typical camera JPEGs, and above Claude's ≈5 MB per-image inline
-limit. (OpenAI allows up to 512 MB/request and Gemini ≈100 MB inline; raise
-`PICTURA_MAX_BODY_MB` / `--max-body-mb` only if you really pass such large
-sources.) Stdio (local) has no body cap.
+Source images are bounded server-side: `POST /images/upload` bodies and
+external image fetches use the `--max-body-mb` cap (default **16 MB**), plenty
+above the ~1.6 MB outputs and typical camera JPEGs. Raise
+`PICTURA_MAX_BODY_MB` / `--max-body-mb` only if you really pass very large
+sources. Stdio (local) has no body cap.
 
 ---
 
@@ -254,7 +265,7 @@ bound to any client. Every client stores server definitions in the same shape:
   project `.mcp.json` (template: `deploy/mcp.json.example`) or in the client's
   own config file. See the README table for exact per-client locations.
 - **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Remote (HTTP)**: `deploy/mcp.remote.json.example` — `url` + `Authorization`
+- **Remote (HTTP)**: `deploy/mcp.remote.json.example` — `url` + `PICTURA_API_KEY`
   header instead of `command`/`args`.
 
 ```json
@@ -305,8 +316,10 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 ## 10. Verified behavior (tests on this host)
 
 - SDXL load ~3 s cached; 1024×1024/30 ≈ 31 s (CPU-offload), img2img 1024 ≈ 14 s.
-- 10.7 MB JPEG (14 MB base64 body) accepted for img2img input.
-- Remote with token: 401 on missing/wrong token; initialize + tools/list OK.
+- Large camera-JPEG source images accepted for img2img input (bounded by
+  `--max-body-mb`).
+- Remote with token: 401 on missing/wrong token; `POST /images/upload` +
+  `GET /images/<id>` round-trip OK; initialize + tools/list OK.
 - Statelessness: `outputs/` unchanged after generation via MCP.
 
 ---
@@ -318,6 +331,7 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 README.md                        # usage guide (any MCP client)
 SPEC.md                          # this document
 COMPARISON.md                    # vs other image-gen MCPs
+LICENSE                          # MIT license
 deploy/
   mcp.json.example               # client config TEMPLATE (project .mcp.json)
   mcp.remote.json.example        # HTTP client config TEMPLATE
@@ -328,6 +342,10 @@ deploy/
 server/
   pictura_server.py                # MCP image server (the implementation)
   requirements.txt               # python deps
+  requirements-cu128.txt         # python deps for CUDA-12.8-driver machines
+skills/
+  README.md                      # Agent Skill install guide
+  pictura-mcp/SKILL.md           # the Agent Skill (operating policy for agents)
 .gitignore
 ```
 **You must make these yourself on each machine (after cloning):**

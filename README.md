@@ -172,17 +172,24 @@ You can also run the server as an independent process that clients reach over
 - `--api-key <key>` (or env `PICTURA_API_KEY`) requires the API key on every
   request via the **`PICTURA_API_KEY`** header; **always set it when the server
   is reachable beyond localhost**
-- **Host files are not read remotely**: over http/sse, `edit_image` accepts
-  only `data:` URIs — no server-side file paths / `file://` URIs (secure
-  default). Only a **local stdio run** may read host paths (see § Image
-  editing).
-- `--max-body-mb <MB>` (default 16) caps the HTTP request body; base64 images
-  arrive in the body
+- **Uploading source images**: `POST /images/upload` accepts raw image bytes
+  (API-key protected, body capped by `--max-body-mb`) and returns a
+  short-lived `http://<base>/images/<id>` URL that `edit_image` accepts and
+  `GET /images/<id>` serves back. Example:
+  `curl --data-binary @photo.jpg -H 'Content-Type: image/jpeg' -H 'PICTURA_API_KEY: <key>' http://<host>:8000/images/upload`
+- **`edit_image` takes an `http(s)://` URL as the source**: a server image URL
+  (from `generate_image` / `edit_image` / the upload endpoint) resolves from
+  the in-memory cache, and any external image URL is fetched server-side with
+  an **SSRF guard** (private/loopback addresses are refused). Host files are
+  never read over http/sse — only a **local stdio run** may pass a file path
+  (see § Image editing).
+- `--max-body-mb <MB>` (default 16) caps the HTTP request body: image uploads
+  and external image fetches
 - The server is **stateless**: no image files are written on the server in any
   mode. Over http/sse each generated image is returned as a **short-lived
   download URL** (served from an in-memory TTL cache at `GET /images/<id>`);
-  over stdio it is returned inline as base64. Clients save the image wherever
-  they like.
+  uploaded images live in the same cache. Over stdio results are returned
+  inline as base64. Clients save the image wherever they like.
 - Image URLs over http/sse are built from the request's `Host` header by
   default (reverse-proxy friendly), so **`PICTURA_PUBLIC_URL` is usually not
   needed**; set it only to force a specific externally visible base (e.g.
@@ -288,9 +295,9 @@ systemctl --user status pictura-mcp
 
 Log rotation: `deploy/logrotate.example` (copytruncate, or SIGHUP postrotate).
 
-> Verified end-to-end: `tools/list` returns `generate_image`, `edit_image`,
-> `server_status`; missing/wrong tokens get 401; clients connect over stdio and
-> over HTTP.
+> Verified end-to-end: `tools/list` returns all five tools (`generate_image`,
+> `edit_image`, `list_loras`, `list_control_types`, `server_status`); missing/
+> wrong tokens get 401; clients connect over stdio and over HTTP.
 
 ## Model (env `PICTURA_MODEL`)
 
@@ -308,10 +315,15 @@ runtime also auto-offloads and retries.
 
 `edit_image(prompt, image, ...)` transforms an existing image:
 
-- **`image`**: a local file path or `file://` URI on a **local stdio run**, or a
-  `data:image/...;base64,...` URI (works everywhere — portable across machines).
-  Over **http/sse (remote)** the server reads no host files: `data:` URIs only
-  (secure default).
+- **`image`**: an `http(s)://` URL. A **server image URL**
+  (`http://<host>/images/<id>`) — from `generate_image`, a previous
+  `edit_image`, or `POST /images/upload` — resolves from the server's
+  in-memory cache. Any **external image URL** is fetched server-side
+  (SSRF-guarded: private/loopback addresses are refused). On a **local stdio
+  run** you may also pass a **host file path** or `file://` URI; over
+  http/sse the server never reads host files.
+  To edit a local image against a remote server, upload it first with
+  `POST /images/upload` to get a server image URL.
 - **`strength`** (0..1, default 0.6): higher = larger change
 - **`width`/`height`** (0 = keep source size; clamp ≤1024, multiple of 8)
 
@@ -320,10 +332,9 @@ model copy). `--smoke` also exercises the img2img path.
 
 ## Input size & VRAM notes
 
-- Base64 image input travels in the request body → governed by
-  `--max-body-mb` (default **16 MB ≈ 12 MB image**), ample headroom over the
-  ~1.6 MB outputs and typical camera JPEGs. Raise it only if you need to pass
-  very large source images.
+- Uploaded and fetched source images are bounded by `--max-body-mb`
+  (default **16 MB**), ample headroom over the ~1.6 MB outputs and typical
+  camera JPEGs. Raise it only if you need to pass very large source images.
 - fp16 + attention/VAE slicing + proactive CPU offload + OOM auto-retry are all
   baked in for low-VRAM cards.
 - GPU selection: set `PICTURA_CUDA_DEVICE` (e.g. `0` or `0,1`) to restrict which

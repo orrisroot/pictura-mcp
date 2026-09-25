@@ -13,8 +13,9 @@ license: MIT
 # Pictura MCP
 
 Pictura MCP is a **local, stateless** image-generation MCP server (Stable
-Diffusion, SDXL by default). The images come back to you inline; the server
-never writes files, so **you save them yourself**.
+Diffusion, SDXL by default). Images come back to you inline (stdio) or as a
+short-lived download URL (http/sse); the server never writes files, so **you
+save them yourself**.
 
 ## Tools
 
@@ -73,7 +74,7 @@ generate_image(
 ```
 edit_image(
   prompt,                       # required
-  image,                        # required: file path (stdio/local) or data:image URI (anywhere)
+  image,                        # required: http(s) URL, or file path (stdio/local)
   negative_prompt = "",
   strength = 0.6,               # 0..1; higher = bigger change
   width = 0, height = 0,        # 0 = keep source size, clamp ≤1024
@@ -85,6 +86,23 @@ edit_image(
   control_scale = 1.0           # ~0.4-1.0
 )
 ```
+
+**`image` — how to point at the source image:**
+
+- **A server image URL** `http://<host>/images/<id>` is best: it comes out of
+  `generate_image` / `edit_image` results (http/sse mode) or from a
+  `POST /images/upload` response, and resolves from the in-memory cache.
+- **An external `http(s)://` URL** is also accepted; the server fetches it
+  (private/loopback addresses are refused).
+- **On a local stdio run** you may pass a **host file path** or `file://` URI.
+- **Uploading a local file over http/sse**: `POST /images/upload` with the
+  image bytes in the body returns `{"image": ".../images/<id>", ...}` — pass
+  that URL to `edit_image`.
+- To chain an edit onto a generation: use the download URL from the
+  `generate_image` result, or save the returned image locally and pass its
+  path (stdio).
+
+The tool schema shows which forms apply to the current run.
 
 `control_type` preprocesses the source image internally (e.g. canny/depth/pose)
 and steers the edit; it is **SDXL-only**.
@@ -107,10 +125,12 @@ and steers the edit; it is **SDXL-only**.
 ## Notes
 
 - First calls may download/load models and prefetch; expect them to be slow.
-- **`edit_image` source input**: on a local stdio run you may pass a host file
-  path or `file://` URI; over http/sse only a `data:image/...;base64,...` URI is
-  accepted (the server never reads host files remotely). The tool schema shows
-  which mode applies.
+- **`edit_image` source input**: pass an `http(s)://` URL — a server image URL
+  from `generate_image` / `edit_image` / `POST /images/upload` (resolved from
+  the in-memory cache) or an external image URL (fetched, SSRF-guarded). On a
+  local stdio run a host file path / `file://` URI is also accepted; over
+  http/sse the server never reads host files. The tool schema shows which
+  mode applies.
 - Sizes must be multiples of 8 within [256, 1024].
 - **Privacy**: never write the user's prompt into log files, notes, or other
   persistent text.

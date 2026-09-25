@@ -15,7 +15,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 | API key required | ❌ | ❌ | ✅ | ✅ (`WAVESPEED_API_KEY`) | ✅ (`FAL_KEY`) |
 | Privacy (image data) | **stays on your host** | stays on your host | leaves host | leaves host | leaves host |
 | Text-to-image | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Image-to-image / editing | ✅ (in-memory, incl. data-URI input) | ✅ (rich) | ✅ | ✅ | ✅ |
+| Image-to-image / editing | ✅ (in-memory, http(s) / upload-URL input) | ✅ (rich) | ✅ | ✅ | ✅ |
 | ControlNet / LoRA / custom checkpoints | ⚠️ code-level (not exposed as tools) | ✅ (first-class, big ecosystem) | some (platform models) | ✅ model catalog | ✅ 600+ models |
 | Video / audio / 3D | ❌ | ✅ | ✅ (platform) | ✅ | ✅ |
 | Workflow authoring / graph editing | ❌ | ✅ (node workflows, natural language) | ❌ | ❌ | ❌ |
@@ -24,7 +24,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 | Remote / headless | ✅ + systemd unit | ✅ (LAN/VPS) | hosted | hosted | hosted |
 | Auth on your server | ✅ API key (PICTURA_API_KEY header) | ⚠️ not emphasized (LAN) | platform auth | platform API key | platform API key |
 | Server stateless (no files kept on host) | ✅ always (stdio: inline base64 / http-sse: short-lived download URL, RAM cache) | ⚠️ writes files/workflows | n/a | `local` output mode writes to disk | n/a (URLs on CDN) |
-| Image input size cap | **16 MB body** (~12 MB img) default, tunable via `PICTURA_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
+| Image input size cap | **16 MB** upload/fetch cap, tunable via `PICTURA_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
 | Ecosystem / maturity | self-maintained, small | very large (Civitai workflows, plugins) | vendor, large | growing | large (600+ models) |
 
 ## 2. Where this project wins
@@ -35,14 +35,16 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 - **Self-contained**: no ComfyUI / reverse proxy / external engine to install —
   one Python server + Hugging Face cache.
 - **Headless + stateless**: purpose-built for agent use; never writes to
-  disk, returns base64 inline, identical behavior local or remote, and can run
-  as a single systemd service behind an API key.
+  disk (images arrive inline over stdio or as short-lived download URLs over
+  http/sse), identical behavior local or remote, and can run as a single
+  systemd service behind an API key.
 - **Low-VRAM-friendly engineering**: fp16, slicing, proactive CPU offload and OOM
   auto-retry are built in and default-on for SDXL at 1024 px.
-- **Decent image input**: 16 MB request body by default (≈12 MB image) — well
-  above Claude's ≈5 MB per-image inline limit and headroom over the ~1.6 MB
-  outputs; raise `--max-body-mb` / `PICTURA_MAX_BODY_MB` only if you really
-  pass very large sources.
+- **Generous image input**: source images are uploaded as raw bytes or
+  referenced by URL (no base64 inflation); `--max-body-mb` /
+  `PICTURA_MAX_BODY_MB` cap uploads and external fetches at **16 MB** by
+  default — headroom over the ~1.6 MB outputs and typical camera JPEGs. Raise
+  the cap only if you pass very large sources.
 
 ## 3. Where established MCPs win
 
@@ -58,8 +60,6 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 
 If the comparison favors gaps we care about, the cheapest wins to add here:
 
-1. **`http(s)://` image input** in `edit_image` (fetch server-side) → mirrors
-   cloud-MCP workflows.
-2. **Batch / multi-seed generate** tool.
-3. **Video gen** would require a different model family (e.g. Wan/LTX) — larger
+1. **Batch / multi-seed generate** tool.
+2. **Video gen** would require a different model family (e.g. Wan/LTX) — larger
    scope; not recommended for a low-VRAM card.
