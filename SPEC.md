@@ -330,9 +330,9 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 - Remote with token: 401 on missing/wrong token; `POST /images/upload` +
   `GET /images/<id>` round-trip OK; initialize + tools/list OK.
 - Bucket snapping (GPU): `generate_image(1152×896)` outputs 1152×896;
-  `generate_image(512×512)` snaps to 960×1024; the generated download URL
-  feeds `edit_image` directly (same bucket). `server_status` reports the
-  new `size_policy` / `snap_buckets` / `native_size` fields.
+  `generate_image(512×512)` snaps to 1024×1024 (aspect kept); the generated
+  download URL feeds `edit_image` directly (same bucket). `server_status`
+  reports the new `size_policy` / `snap_buckets` / `native_size` fields.
 - Statelessness: `outputs/` unchanged after generation via MCP.
 
 ---

@@ -941,20 +941,21 @@ def _snap_bucket(width: int, height: int) -> tuple[int, int]:
     """Sanitize a requested size (>= 256, multiple of 8), then snap the pair to
     the nearest SDXL training bucket (~1MP).
 
-    The distance is measured in log-space on aspect ratio and area; the area
-    term is down-weighted so ratio preservation wins when the request is far
-    from ~1MP (a plain equal-weight sum lets tiny area differences decide the
-    bucket). Off-bucket requests keep their intended aspect ratio while
-    staying at the ~1MP area SDXL was trained on. Returns (width, height).
+    The request is first scaled to the ~1MP bucket area (aspect ratio kept),
+    then the nearest bucket is picked by log-space per-axis distance, so the
+    output keeps the requested aspect ratio while staying on a trained bucket
+    (e.g. a 1:1 request snaps to the 1024x1024 bucket, not to a near-square).
     """
     w = max(256, round(width / 8) * 8)
     h = max(256, round(height / 8) * 8)
     if (w, h) in _SDXL_BUCKETS:
         return w, h
+    # Normalize the request to the ~1MP bucket area, preserving aspect ratio.
+    scale = math.sqrt((W_DEFAULT * H_DEFAULT) / (w * h))
+    tw, th = w * scale, h * scale
     return min(
         _SDXL_BUCKETS,
-        key=lambda b: 2 * math.log((w / b[0]) / (h / b[1])) ** 2
-        + 0.1 * math.log((w * h) / (b[0] * b[1])) ** 2,
+        key=lambda b: math.log(tw / b[0]) ** 2 + math.log(th / b[1]) ** 2,
     )
 
 
