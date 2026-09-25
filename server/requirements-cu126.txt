@@ -1,0 +1,25 @@
+# CUDA 12.6 build for pictura-mcp (Volta / V100, compute capability 7.0)
+#
+# torch <=2.7.1 from the cu126 index is the last build that ships the sm_70
+# kernels; newer torch wheels fail on V100 with
+# "CUDA error: no kernel image is available". Do NOT use requirements.txt on a
+# V100 machine - its `torch>=2.9` line upgrades torch away from the working
+# build.
+#
+# Install (standalone, all deps):
+#   python3 -m venv .venv
+#   ./.venv/bin/pip install -r server/requirements-cu126.txt
+#
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.7.1+cu126
+torchvision==0.22.1+cu126
+torchaudio==2.7.1+cu126
+diffusers>=0.40
+transformers>=5.17
+accelerate>=1.15
+safetensors>=0.8
+pillow>=12
+mcp>=2.2
+peft>=0.21
+ultralytics>=8
+python-multipart>=0.0.20

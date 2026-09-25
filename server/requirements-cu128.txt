@@ -21,7 +21,6 @@ torchvision
 
 # Volta (V100 / compute capability 7.0) needs torch <=2.7.1 from the cu126
 # index (newer builds dropped the sm_70 kernels; generation fails with
-# "CUDA error: no kernel image is available"):
-#   ./.venv/bin/pip install "torch==2.7.1" "torchvision==0.22.1" "torchaudio" \
-#       --index-url https://download.pytorch.org/whl/cu126
-#   ./.venv/bin/pip install -r server/requirements.txt
+# "CUDA error: no kernel image is available"). Install the whole cu126 variant
+# instead of running requirements.txt on a V100 machine:
+#   ./.venv/bin/pip install -r server/requirements-cu126.txt

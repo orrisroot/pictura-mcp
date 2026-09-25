@@ -94,12 +94,12 @@ to torch 2.11.x, and all other deps only require torch≥2.6.) Verify with
 
 **Volta (V100, compute capability 7.0):** requires torch ≤2.7.1 from the cu126
 index — later torch builds do not include the sm_70 kernels, so generation
-fails with `CUDA error: no kernel image is available`:
+fails with `CUDA error: no kernel image is available`. Use the cu126
+requirements file (do **not** install `requirements.txt`, whose `torch>=2.9`
+would upgrade torch again):
 
 ```bash
-./.venv/bin/pip install "torch==2.7.1" "torchvision==0.22.1" "torchaudio" \
-    --index-url https://download.pytorch.org/whl/cu126
-./.venv/bin/pip install -r server/requirements.txt   # keeps 2.7.1+cu126
+./.venv/bin/pip install -r server/requirements-cu126.txt
 ```
 
 > **Repo layout note (gitignored files).** The committed repository ships
