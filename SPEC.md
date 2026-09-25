@@ -166,8 +166,9 @@ python server/pictura_server.py [options]
 
 - http → endpoint `/mcp` (streamable HTTP, JSON responses)
 - sse → endpoint `/sse`
-- **Image upload**: `POST /images/upload` accepts raw image bytes (API-key
-  protected, body capped by `--max-body-mb`) and returns a short-lived
+- **Image upload**: `POST /images/upload` accepts raw image bytes or a
+  multipart/form-data `file` field (API-key protected, body capped by
+  `--max-body-mb`) and returns a short-lived
   `http://<base>/images/<id>` URL; the image is stored in the same in-memory
   TTL cache and served back by `GET /images/<id>`.
 - **Image downloads**: `GET /images/<id>` serves cached generated / uploaded

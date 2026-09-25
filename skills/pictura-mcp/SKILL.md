@@ -96,8 +96,8 @@ edit_image(
   (private/loopback addresses are refused).
 - **On a local stdio run** you may pass a **host file path** or `file://` URI.
 - **Uploading a local file over http/sse**: `POST /images/upload` with the
-  image bytes in the body returns `{"image": ".../images/<id>", ...}` — pass
-  that URL to `edit_image`.
+  image bytes in the body (raw, or multipart `file` field) returns
+  `{"image": ".../images/<id>", ...}` — pass that URL to `edit_image`.
 - To chain an edit onto a generation: use the download URL from the
   `generate_image` result, or save the returned image locally and pass its
   path (stdio).

@@ -172,11 +172,12 @@ You can also run the server as an independent process that clients reach over
 - `--api-key <key>` (or env `PICTURA_API_KEY`) requires the API key on every
   request via the **`PICTURA_API_KEY`** header; **always set it when the server
   is reachable beyond localhost**
-- **Uploading source images**: `POST /images/upload` accepts raw image bytes
-  (API-key protected, body capped by `--max-body-mb`) and returns a
-  short-lived `http://<base>/images/<id>` URL that `edit_image` accepts and
-  `GET /images/<id>` serves back. Example:
+- **Uploading source images**: `POST /images/upload` accepts raw image bytes or
+  a multipart/form-data `file` field (API-key protected, body capped by
+  `--max-body-mb`) and returns a short-lived `http://<base>/images/<id>` URL
+  that `edit_image` accepts and `GET /images/<id>` serves back. Examples:
   `curl --data-binary @photo.jpg -H 'Content-Type: image/jpeg' -H 'PICTURA_API_KEY: <key>' http://<host>:8000/images/upload`
+  or `curl -F 'file=@photo.jpg' -H 'PICTURA_API_KEY: <key>' http://<host>:8000/images/upload`
 - **`edit_image` takes an `http(s)://` URL as the source**: a server image URL
   (from `generate_image` / `edit_image` / the upload endpoint) resolves from
   the in-memory cache, and any external image URL is fetched server-side with

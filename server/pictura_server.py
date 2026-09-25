@@ -2062,7 +2062,9 @@ def _attach_http_middleware(
     - GET /images/<id> serves a cached image; the id is an unguessable secret,
       so the URL itself is the capability (valid for the short cache TTL, no
       additional auth).
-    - POST /images/upload accepts raw image bytes and registers the image in
+    - POST /images/upload accepts raw image bytes or a multipart/form-data
+      `file` field (e.g. as forwarded by an MCP/HTTP pass-through proxy) and
+      registers the image in
       the same in-memory cache, returning a short-lived /images/<id> URL that
       edit_image accepts (and GET can serve back). Uploads are API-key
       protected (unlike GET, which is capability-based).
@@ -2080,13 +2082,27 @@ def _attach_http_middleware(
     async def _upload_image(request):
         import asyncio
 
-        body = b""
-        async for chunk in request.stream():
-            body += chunk
-            if len(body) > max_body_bytes:
-                return JSONResponse({"error": "request body too large"}, status_code=413)
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("multipart/form-data"):
+            # LiteLLM pass-through proxies uploads as multipart; accept the
+            # standard `file` field there over http/sse as well as raw bytes.
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None:
+                return JSONResponse(
+                    {"error": "multipart form must include a 'file' field"}, status_code=400
+                )
+            body = await upload.read()
+        else:
+            body = b""
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > max_body_bytes:
+                    return JSONResponse({"error": "request body too large"}, status_code=413)
         if not body:
             return JSONResponse({"error": "empty body - send image bytes"}, status_code=400)
+        if len(body) > max_body_bytes:
+            return JSONResponse({"error": "request body too large"}, status_code=413)
         try:
             png, w, h = await asyncio.to_thread(_encode_upload, body)
         except ValueError as e:

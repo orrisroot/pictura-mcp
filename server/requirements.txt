@@ -13,3 +13,4 @@ pillow>=12
 mcp>=2.2
 peft>=0.21
 ultralytics>=8
+python-multipart>=0.0.20
