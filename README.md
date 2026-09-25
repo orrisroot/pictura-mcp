@@ -61,6 +61,8 @@ one model-load per extra slot.
 
 ```bash
 # 1) Python venv + dependencies (torch is the CUDA build, ~3GB)
+#    V100 (Volta, compute capability 7.0) machines must use the V100 file:
+#    ./.venv/bin/pip install -r server/requirements-v100.txt
 python3 -m venv .venv
 ./.venv/bin/pip install -r server/requirements.txt
 
@@ -77,29 +79,14 @@ The default install above pulls the latest torch from PyPI, whose wheels are
 built for **CUDA 13** (`cu130`) — this needs a CUDA-13-capable driver
 (**≥ 580**). Check yours with `nvidia-smi` (top-right corner).
 
-If your driver only supports up to **CUDA 12.8** (e.g. 570.x drivers), install
-the `cu128` torch build instead — same code, older CUDA runtime:
-
-```bash
-python3 -m venv .venv
-./.venv/bin/pip install "torch==2.11.0" "torchvision" \
-    --index-url https://download.pytorch.org/whl/cu128
-./.venv/bin/pip install -r server/requirements.txt   # keeps 2.11.0+cu128
-```
-
-(`server/requirements-cu128.txt` documents this variant; cu128 wheels exist up
-to torch 2.11.x, and all other deps only require torch≥2.6.) Verify with
-`./.venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"`
-— expect e.g. `2.11.0+cu128` and `True`.
-
 **Volta (V100, compute capability 7.0):** requires torch ≤2.7.1 from the cu126
 index — later torch builds do not include the sm_70 kernels, so generation
-fails with `CUDA error: no kernel image is available`. Use the cu126
-requirements file (do **not** install `requirements.txt`, whose `torch>=2.9`
-would upgrade torch again):
+fails with `CUDA error: no kernel image is available`. Use
+`server/requirements-v100.txt` (do **not** install `requirements.txt`, whose
+`torch>=2.9` would upgrade torch again):
 
 ```bash
-./.venv/bin/pip install -r server/requirements-cu126.txt
+./.venv/bin/pip install -r server/requirements-v100.txt
 ```
 
 > **Repo layout note (gitignored files).** The committed repository ships

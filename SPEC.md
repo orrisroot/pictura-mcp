@@ -174,7 +174,7 @@ python server/pictura_server.py [options]
 - **Image downloads**: `GET /images/<id>` serves cached generated / uploaded
   images (see §1 / §6). Set `PICTURA_PUBLIC_URL` when binding `0.0.0.0` or
   behind NAT / a reverse proxy so the URLs returned to clients are reachable;
-  without it the server falls back to inline returns with a warning.
+  without it the server falls back to inline (base64) results.
 - **Image return mode**: stdio → inline base64; http/sse → short-lived URL
   (URL only; no inline bytes), unless no public base is resolvable (falls back
   to inline).
@@ -310,8 +310,10 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 `deploy/pictura-mcp.env` (secrets), `.venv/`, and `outputs/`.
 
 - **Venv**: `.venv` (@ Python 3.14 + torch 2.14 CUDA). Rebuild with
-  `server/requirements.txt`. For CUDA-12.8-driver machines, install the
-  `cu128` torch build first (torch 2.11.0, see `server/requirements-cu128.txt`).
+  `server/requirements.txt` (needs a CUDA-13-capable driver, ≥580).
+  **Volta/V100 (compute capability 7.0) machines**: use
+  `server/requirements-v100.txt` (torch 2.7.1+cu126) instead — newer torch
+  builds dropped the sm_70 kernels.
 - **systemd (recommended for long-running / remote)**: can run under a
   **dedicated service account**. `deploy/install-systemd.sh <PROJECT_ROOT>
   [SERVICE_USER] [PORT]` (root) creates the unprivileged account, prepares the
@@ -356,7 +358,7 @@ deploy/
 server/
   pictura_server.py                # MCP image server (the implementation)
   requirements.txt               # python deps
-  requirements-cu128.txt         # python deps for CUDA-12.8-driver machines
+  requirements-v100.txt          # python deps for Volta/V100 (torch 2.7.1+cu126)
 skills/
   README.md                      # Agent Skill install guide
   pictura-mcp/SKILL.md           # the Agent Skill (operating policy for agents)
@@ -366,7 +368,7 @@ skills/
 ```
 .mcp.json                        # YOUR client config - copy deploy/mcp.json.example and fill in
 deploy/pictura-mcp.env            # YOUR secrets - copy deploy/pictura-mcp.env.example, set the token
-.venv/                           # python env - create with: python3 -m venv .venv (+ pip install -r server/requirements.txt)
+.venv/                           # python env - create with: python3 -m venv .venv (+ pip install -r server/requirements.txt; V100: -r server/requirements-v100.txt)
 outputs/                         # created automatically later by: server/pictura_server.py --smoke
 ```
 The exact steps live in the README (Setup → Repo layout note). Git tracking

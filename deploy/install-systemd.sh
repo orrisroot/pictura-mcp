@@ -54,7 +54,8 @@ if [[ $ADOPT -eq 1 ]]; then
 fi
 if [[ ! -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
   echo "error: $PROJECT_ROOT/.venv/bin/python not found -" >&2
-  echo "       run README §Setup step 1 first (python3 -m venv .venv && pip install -r server/requirements.txt)" >&2
+  echo "       run README §Setup step 1 first (python3 -m venv .venv &&" >&2
+  echo "       pip install -r server/requirements.txt; V100: -r server/requirements-v100.txt)" >&2
   exit 1
 fi
 

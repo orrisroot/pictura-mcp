@@ -40,8 +40,9 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
   systemd service behind an API key.
 - **Low-VRAM-friendly engineering**: fp16, slicing, proactive CPU offload and OOM
   auto-retry are built in and default-on for SDXL at 1024 px.
-- **Generous image input**: source images are uploaded as raw bytes or
-  referenced by URL (no base64 inflation); `--max-body-mb` /
+- **Generous image input**: source images are uploaded as raw bytes or a
+  multipart `file` field, or referenced by URL (no base64 inflation);
+  `--max-body-mb` /
   `PICTURA_MAX_BODY_MB` cap uploads and external fetches at **16 MB** by
   default — headroom over the ~1.6 MB outputs and typical camera JPEGs. Raise
   the cap only if you pass very large sources.

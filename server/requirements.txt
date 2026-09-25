@@ -1,9 +1,9 @@
 # Image generation MCP server deps (local GPU, low-VRAM friendly)
 # Install:  python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 #
-# torch: >=2.9 so that CUDA-12.8-driver machines can pin 2.11.0+cu128
-# (see requirements-cu128.txt). Default PyPI wheels (torch 2.14 = cu130 build)
-# require a CUDA-13-capable driver (>=580).
+# torch: >=2.9 (default PyPI wheel, torch 2.14 = cu130 build) requires a
+# CUDA-13-capable driver (>=580). Volta/V100 machines need
+# server/requirements-v100.txt (torch 2.7.1+cu126) instead.
 torch>=2.9
 diffusers>=0.40
 transformers>=5.17

@@ -50,7 +50,8 @@ image paths only on a local stdio run; over http/sse the server never touches
 the remote host's filesystem.
 
 Source images can also be uploaded with `POST /images/upload` (http/sse only,
-API-key protected): send the raw image bytes in the request body and the
+API-key protected): send the raw image bytes or a multipart/form-data `file`
+field in the request body and the
 response is a short-lived `http://<base>/images/<id>` URL that `edit_image`
 accepts and that GET /images/<id> can serve back.
 
