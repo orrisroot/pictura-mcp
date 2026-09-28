@@ -28,7 +28,6 @@ Configuration (environment variables):
 URL image return (http/sse only):
     PICTURA_PUBLIC_URL              externally visible base URL; default = the
                                   request's Host header (reverse-proxy friendly)
-    PICTURA_FORWARDED_ALLOW_IPS     uvicorn forwarded-allow-ips (default 127.0.0.1)
     PICTURA_IMAGE_URL_TTL            short-term cache lifetime for image URLs, seconds
                                   (default 600)
     PICTURA_IMAGE_URL_MAX            max cached images (default 64)
@@ -215,9 +214,6 @@ _URL_MAX_BYTES = max(
 # incoming request (reverse proxy Host / X-Forwarded-Proto), falling back to
 # the bind address.
 _PUBLIC_BASE = (_env("PICTURA_PUBLIC_URL") or "").strip().rstrip("/") or None
-# uvicorn --forwarded-allow-ips: peers whose X-Forwarded-* headers are trusted
-# (reverse proxies on the same host are trusted by default).
-_FWD_ALLOW_IPS = (_env("PICTURA_FORWARDED_ALLOW_IPS") or "127.0.0.1").strip()
 
 # HTTP request-body cap (MB) for http/sse: bounds POST /images/upload bodies
 # and external image fetches. CLI --max-body-mb overrides at startup.
@@ -2273,7 +2269,6 @@ def _run_http_server(
         host=host,
         port=port,
         log_level="warning",
-        forwarded_allow_ips=_FWD_ALLOW_IPS,
     )
     return 0
 
