@@ -3,8 +3,9 @@
 # torch <=2.7.1 from the cu126 index is the last build that ships the sm_70
 # kernels; newer torch wheels fail on V100 with
 # "CUDA error: no kernel image is available". Do NOT use requirements.txt on a
-# V100 machine - its `torch>=2.9` line upgrades torch away from the working
-# build.
+# V100 machine - its `torch>=2.9,<3.0` line upgrades torch away from the
+# working build. The torch triplet is pinned exactly (the only pins needed);
+# everything else follows the same tested ranges as requirements.txt.
 #
 # Install (standalone, all deps):
 #   python3 -m venv .venv
@@ -14,12 +15,12 @@
 torch==2.7.1+cu126
 torchvision==0.22.1+cu126
 torchaudio==2.7.1+cu126
-diffusers>=0.40
-transformers>=5.17
-accelerate>=1.15
-safetensors>=0.8
-pillow>=12
-mcp>=2.2
-peft>=0.21
-ultralytics>=8
-python-multipart>=0.0.20
+diffusers>=0.40,<1.0
+transformers>=5.17,<6.0
+accelerate>=1.15,<2.0
+safetensors>=0.8,<1.0
+pillow>=12,<13
+mcp>=2.2,<3.0
+peft>=0.21,<1.0
+ultralytics>=8,<9
+python-multipart>=0.0.20,<1.0
