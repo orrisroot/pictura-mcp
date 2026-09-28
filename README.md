@@ -161,12 +161,17 @@ You can also run the server as an independent process that clients reach over
 - `--api-key <key>` (or env `PICTURA_API_KEY`) requires the API key on every
   request via the **`PICTURA_API_KEY`** header; **always set it when the server
   is reachable beyond localhost**
-- **Uploading source images**: `POST /images/upload` accepts raw image bytes or
-  a multipart/form-data `file` field (API-key protected, body capped by
-  `--max-body-mb`) and returns a short-lived `http://<base>/images/<id>` URL
-  that `edit_image` accepts and `GET /images/<id>` serves back. Examples:
+- **Uploading source images**: `POST /images/upload` is API-key protected and
+  accepts raw image bytes or a multipart/form-data `file` field (body capped by
+  `--max-body-mb`); it returns a short-lived `http://<base>/images/<id>` URL
+  that `edit_image` accepts and `GET /images/<id>` serves back. **Preferred
+  flow over http/sse**: call the `upload_image` tool first — it returns a
+  **one-time token** (TTL `PICTURA_UPLOAD_TICKET_TTL`, default 120 s) and a
+  ready-to-run `curl` line; then POST with the `X-UPLOAD-TOKEN` header (no
+  long-lived key on the upload request). Direct `PICTURA_API_KEY` uploads also
+  work. Examples:
   `curl --data-binary @photo.jpg -H 'Content-Type: image/jpeg' -H 'PICTURA_API_KEY: <key>' http://<host>:8000/images/upload`
-  or `curl -F 'file=@photo.jpg' -H 'PICTURA_API_KEY: <key>' http://<host>:8000/images/upload`
+  or `curl -F 'file=@photo.jpg' -H 'X-UPLOAD-TOKEN: <token>' http://<host>:8000/images/upload`
 - **`edit_image` takes an `http(s)://` URL as the source**: a server image URL
   (from `generate_image` / `edit_image` / the upload endpoint) resolves from
   the in-memory cache, and any external image URL is fetched server-side with

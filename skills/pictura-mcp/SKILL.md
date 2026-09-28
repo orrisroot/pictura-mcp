@@ -95,10 +95,12 @@ edit_image(
 - **An external `http(s)://` URL** is also accepted; the server fetches it
   (private/loopback addresses are refused).
 - **On a local stdio run** you may pass a **host file path** or `file://` URI.
-- **Uploading a local file over http/sse**: `POST /images/upload` with the
-  image bytes in the body (raw, or multipart `file` field) returns
-  `{"image": ".../images/<id>", ...}` — pass that URL to `edit_image`. Send it
-  with the **same API-key header you use to authenticate to this MCP server**.
+- **Uploading a local file over http/sse**: call the `upload_image` tool to
+  reserve an upload — it returns a **one-time token** and a ready-to-run
+  `curl` line; then POST the bytes (raw or multipart `file` field) to the
+  returned URL with the `X-UPLOAD-TOKEN` header. The response is
+  `{"image": ".../images/<id>", ...}` — pass that URL to `edit_image`. (Direct
+  `PICTURA_API_KEY`-header uploads also work.)
 - **Downloading results over http/sse**: the download URLs are short-lived
   capability links; fetch and save them.
 - To chain an edit onto a generation: use the download URL from the

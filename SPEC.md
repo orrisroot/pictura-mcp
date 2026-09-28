@@ -23,6 +23,7 @@ VS Code, Windsurf, local agent frameworks, …) can connect.
 
 - Text-to-image (`generate_image`)
 - Image-to-image / editing (`edit_image`)
+- Upload reservation (`upload_image`)
 - Status introspection (`server_status`)
 
 **Key policies**
@@ -79,6 +80,18 @@ Edits an existing image with a prompt (img2img).
 | `lora` | string | `""` | optional LoRA adapters, `'huggingface/repo:weight,...'` |
 | `control_type` | string | `""` | optional abstract ControlNet type applied to the source (`canny`, `depth`, `openpose`); server hides the model; empty = disabled |
 | `control_scale` | float | 1.0 | ControlNet conditioning strength (~0.4–1.0) |
+
+### `upload_image`
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `filename` | string | `""` | informational hint for the saved file name |
+
+Reserves an upload over http/sse: returns a **one-time token** (TTL
+`PICTURA_UPLOAD_TICKET_TTL`, default 120 s, single use) plus the
+`POST /images/upload` URL and a ready-to-run `curl` line. The client then POSTs
+the image bytes (raw or multipart `file`) with the `X-UPLOAD-TOKEN` header —
+no long-lived API key is used on the upload request. The `PICTURA_API_KEY`
+header is also accepted (direct/LAN clients).
 
 ### `list_loras`
 Returns the allowlisted LoRA ids valid for the `lora` parameter.
@@ -237,6 +250,7 @@ python server/pictura_server.py [options]
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
 | `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse; bounds image uploads and external image fetches |
+| `PICTURA_UPLOAD_TICKET_TTL` | `120` | upload ticket TTL (seconds) from `upload_image` |
 | `PICTURA_API_KEY` | unset | API key; clients send it in the `PICTURA_API_KEY` header; fallback when `--api-key` not given |
 | `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
