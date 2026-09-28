@@ -71,9 +71,13 @@ Transports / remote access (CLI):
                                  external image fetches; 16 MB is ample for
                                  typical images and ~1.6 MB outputs. Raise only
                                  if you need to pass very large images.
-    --api-key <key>              require the API key on http/sse: clients send it via
-                                 the PICTURA_API_KEY header
+    --api-key <key>              REQUIRED for http/sse (refuses to start without):
+                                 remote clients send it via the PICTURA_API_KEY header
     --log-file <path>            append [pictura-mcp] logs to a file (default: stderr)
+
+http/sse also requires PICTURA_PUBLIC_URL when binding a non-loopback address
+(the externally visible base - scheme + host + any path prefix), so returned
+image URLs are reachable behind reverse proxies.
 
 Run:
     ./.venv/bin/python server/pictura_server.py                     # stdio MCP server
@@ -233,27 +237,48 @@ _UPLOAD_TICKET_TTL = max(
     1.0, float(_env("PICTURA_IMAGE_UPLOAD_TICKET_TTL", "120") or 120)
 )
 _UPLOAD_TICKET_MAX = 1024
-_upload_tickets: dict[str, float] = {}
+# token -> (expiry, in-flight). An in-flight ticket blocks concurrent POSTs
+# with the same token; the ticket is consumed only after a successful upload
+# (failures release it for retry).
+_upload_tickets: dict[str, tuple[float, bool]] = {}
+_upload_tickets_lock = threading.Lock()
 
 
 def _issue_upload_ticket() -> str:
     """Create a one-time upload ticket with a short TTL (bounds growth)."""
-    now = time.monotonic()
-    for t in [t for t, exp in _upload_tickets.items() if exp < now]:
-        _upload_tickets.pop(t, None)
-    if len(_upload_tickets) >= _UPLOAD_TICKET_MAX:
-        _upload_tickets.clear()
-    token = secrets.token_urlsafe(32)
-    _upload_tickets[token] = now + _UPLOAD_TICKET_TTL
-    return token
+    with _upload_tickets_lock:
+        now = time.monotonic()
+        for t in [t for t, (exp, _active) in _upload_tickets.items() if exp < now]:
+            _upload_tickets.pop(t, None)
+        if len(_upload_tickets) >= _UPLOAD_TICKET_MAX:
+            _upload_tickets.clear()
+        token = secrets.token_urlsafe(32)
+        _upload_tickets[token] = (now + _UPLOAD_TICKET_TTL, False)
+        return token
 
 
-def _consume_upload_ticket(token: str) -> bool:
-    """Validate and consume a one-time upload ticket (True on success)."""
+def _claim_upload_ticket(token: str) -> bool:
+    """Mark a ticket in-flight; False when unknown, expired or already in use."""
     if not token:
         return False
-    exp = _upload_tickets.pop(token, None)
-    return exp is not None and exp >= time.monotonic()
+    with _upload_tickets_lock:
+        e = _upload_tickets.get(token)
+        if e is None or e[0] < time.monotonic() or e[1]:
+            return False
+        _upload_tickets[token] = (e[0], True)
+        return True
+
+
+def _finish_upload_ticket(token: str, success: bool) -> None:
+    """Consume the ticket on success; release it (retryable) on failure."""
+    if not token:
+        return
+    with _upload_tickets_lock:
+        e = _upload_tickets.get(token)
+        if success:
+            _upload_tickets.pop(token, None)
+        elif e is not None:
+            _upload_tickets[token] = (e[0], False)
 
 
 class _ImageCache:
@@ -1849,12 +1874,13 @@ def _build_server():
         name="server_status",
         title="Server Status",
         description=(
-            "Report the loaded image model, device, dtype, VRAM usage, weight "
-            "size, offload state, the number of concurrent render slots and the "
-            "image-size policy (snap to SDXL ~1MP training buckets)."
+            "Report the loaded image model and the image-size policy. On a "
+            "local stdio run the device, dtype, VRAM usage, weight size, "
+            "offload state, render slots and load time are included too (over "
+            "http/sse that internal information is not exposed)."
         ),
     )
-    async def server_status() -> str:
+    async def server_status(ctx: Context = None) -> str:
         import asyncio
 
         # Load off the event loop: the first call may load the model (minutes).
@@ -1864,19 +1890,26 @@ def _build_server():
                 return slot.info, len(_slots)
 
         info, n_slots = await asyncio.to_thread(_ensure_slot0)
-        return (
-            f"model={info.get('model')}\n"
-            f"device={info.get('device')}\n"
-            f"dtype={info.get('dtype')}\n"
-            f"offload={info.get('offload')}\n"
-            f"weights_gb={info.get('weights_gb')}\n"
-            f"vram_gb={info.get('vram_gb')}\n"
-            f"concurrency_slots={n_slots}\n"
-            f"load_seconds={info.get('load_seconds')}\n"
-            f"size_policy=snap to SDXL ~1MP buckets (>=256, multiple of 8)\n"
-            f"snap_buckets={len(_SDXL_BUCKETS)} (SDXL ~1MP aspect-ratio buckets)\n"
-            f"native_size={W_DEFAULT}x{H_DEFAULT}"
-        )
+        # Local stdio runs get the full introspection; http/sse only the
+        # client-facing model and size policy (no infra details).
+        full = _RETURN_MODE == "inline"
+        lines = [f"model={info.get('model')}"]
+        if full:
+            lines += [
+                f"device={info.get('device')}",
+                f"dtype={info.get('dtype')}",
+                f"offload={info.get('offload')}",
+                f"weights_gb={info.get('weights_gb')}",
+                f"vram_gb={info.get('vram_gb')}",
+                f"concurrency_slots={n_slots}",
+                f"load_seconds={info.get('load_seconds')}",
+            ]
+        lines += [
+            "size_policy=snap to SDXL ~1MP buckets (>=256, multiple of 8)",
+            f"snap_buckets={len(_SDXL_BUCKETS)} (SDXL ~1MP aspect-ratio buckets)",
+            f"native_size={W_DEFAULT}x{H_DEFAULT}",
+        ]
+        return "\n".join(lines)
 
     @server.tool(
         name="list_loras",
@@ -2061,6 +2094,23 @@ def main() -> int:  # noqa: C901
     http_port = args.port or int(_env("PICTURA_PORT", "8000") or "8000")
     http_host = args.host or _env("PICTURA_HOST", "127.0.0.1")
     _set_log_file(args.log_file)
+    if args.transport in ("http", "sse"):
+        if not token:
+            print(
+                "[pictura-mcp] http/sse transport requires an API key: pass "
+                "--api-key or set PICTURA_API_KEY",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        if not _PUBLIC_BASE and http_host not in ("127.0.0.1", "localhost", "::1"):
+            print(
+                "[pictura-mcp] http/sse on a non-loopback bind requires "
+                "PICTURA_PUBLIC_URL (e.g. https://gpu.example.com:8000)",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
     # Image return mode: http/sse -> short-lived download URLs (the base is
     # PICTURA_PUBLIC_URL, else the request Host from the reverse proxy, else
     # the bind address); stdio -> inline base64.
@@ -2126,7 +2176,9 @@ def _auth_ok(request, token: str | None) -> bool:
     """
     if not token:
         return True
-    return request.headers.get("pictura_api_key") == token
+    return secrets.compare_digest(
+        request.headers.get("pictura_api_key", ""), token
+    )
 
 
 def _encode_upload(body: bytes):
@@ -2211,14 +2263,21 @@ def _attach_http_middleware(
 
     async def _dispatch(request, call_next):
         if request.method == "POST" and request.url.path == "/images/upload":
-            if not (
-                _auth_ok(request, token)
-                or _consume_upload_ticket(
-                    request.headers.get("x-upload-token", "")
-                )
-            ):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await _upload_image(request)
+            auth_ok = _auth_ok(request, token)
+            ticket = ""
+            if not auth_ok:
+                ticket = request.headers.get("x-upload-token", "")
+                if not _claim_upload_ticket(ticket):
+                    return JSONResponse({"error": "unauthorized"}, status_code=401)
+            try:
+                resp = await _upload_image(request)
+            except BaseException:
+                if not auth_ok:
+                    _finish_upload_ticket(ticket, False)
+                raise
+            if not auth_ok:
+                _finish_upload_ticket(ticket, resp.status_code == 200)
+            return resp
         if request.url.path.startswith("/images/"):
             return await _serve_image(request)
         if not _auth_ok(request, token):

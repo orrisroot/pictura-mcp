@@ -103,6 +103,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
   sed -i -e "s|^# PICTURA_MODEL_CACHE_DIR=.*|PICTURA_MODEL_CACHE_DIR=$PROJECT_ROOT/.model-cache|" \
          -e "s|^# PICTURA_HOST=.*|PICTURA_HOST=0.0.0.0|" \
          -e "s|^# PICTURA_PORT=.*|PICTURA_PORT=$PORT|" "$ENV_FILE"
+  # Non-loopback binds require PICTURA_PUBLIC_URL; seed it from this host's
+  # IP. Edit it to the public URL when the server sits behind a reverse proxy.
+  if grep -q '^# PICTURA_PUBLIC_URL=' "$ENV_FILE"; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    sed -i "s|^# PICTURA_PUBLIC_URL=.*|PICTURA_PUBLIC_URL=http://${ip:-127.0.0.1}:$PORT|" "$ENV_FILE"
+  fi
   created=1
 fi
 CACHE_DIR="$(grep '^PICTURA_MODEL_CACHE_DIR=' "$ENV_FILE" | cut -d= -f2- || true)"
@@ -141,6 +147,10 @@ else
          -e "s|^# PICTURA_HOST=.*|PICTURA_HOST=0.0.0.0|" \
          -e "s|^# PICTURA_PORT=.*|PICTURA_PORT=$PORT|" \
          -e "s|^PICTURA_API_KEY=.*|PICTURA_API_KEY=${cur_key}|" "$NEW_FILE"
+  if grep -q '^# PICTURA_PUBLIC_URL=' "$NEW_FILE"; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    sed -i "s|^# PICTURA_PUBLIC_URL=.*|PICTURA_PUBLIC_URL=http://${ip:-127.0.0.1}:$PORT|" "$NEW_FILE"
+  fi
   chmod 600 "$NEW_FILE"
   echo "  template changed - your env is untouched; wrote ${NEW_FILE##*/}"
   echo "    diff:  diff $ENV_FILE $NEW_FILE"
