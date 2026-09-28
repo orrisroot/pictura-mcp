@@ -188,10 +188,11 @@ You can also run the server as an independent process that clients reach over
   uploaded images live in the same cache. Over stdio results are returned
   inline as base64. Clients save the image wherever they like.
 - Image URLs over http/sse are built from the request's `Host` header by
-  default (reverse-proxy friendly), so **`PICTURA_PUBLIC_URL` is usually not
-  needed**; set it only to force a specific externally visible base (e.g.
-  behind NAT). Troubleshooting knobs: `PICTURA_IMAGE_CACHE_TTL` (600 s),
-  `PICTURA_IMAGE_CACHE_MAX` (64), `PICTURA_IMAGE_CACHE_MAX_MB` (512).
+  default (reverse-proxy friendly); set **`PICTURA_PUBLIC_URL`** to force a
+  specific externally visible base - needed when a reverse proxy serves the
+  server under a path prefix (e.g. `/llm/pictura`). Troubleshooting knobs:
+  `PICTURA_IMAGE_CACHE_TTL` (600 s), `PICTURA_IMAGE_CACHE_MAX` (64),
+  `PICTURA_IMAGE_CACHE_MAX_MB` (512).
 
 Remote client config (`deploy/mcp.remote.json.example`):
 

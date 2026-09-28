@@ -175,6 +175,7 @@ python server/pictura_server.py [options]
 | `--port` | `8000` | TCP port |
 | `--api-key <key>` | none | require the API key (http/sse) via the `PICTURA_API_KEY` header |
 | `--max-body-mb <n>` | 16 | max HTTP request body (http/sse); bounds image uploads and external image fetches |
+| `--log-file <path>` | stderr | append `[pictura-mcp]` logs to a file (also `$PICTURA_LOG_FILE`) |
 | `--smoke` | — | self-test (txt2img + img2img) writing to `<repo>/outputs/` |
 
 - http → endpoint `/mcp` (streamable HTTP, JSON responses)
@@ -352,7 +353,7 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 - Bucket snapping (GPU): `generate_image(1152×896)` outputs 1152×896;
   `generate_image(512×512)` snaps to 1024×1024 (aspect kept); the generated
   download URL feeds `edit_image` directly (same bucket). `server_status`
-  reports the new `size_policy` / `snap_buckets` / `native_size` fields.
+  reports the `size_policy` / `snap_buckets` / `native_size` fields.
 - Statelessness: `outputs/` unchanged after generation via MCP.
 
 ---
