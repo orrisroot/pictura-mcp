@@ -35,6 +35,8 @@ URL image return (http/sse only):
     PICTURA_IMAGE_URL_MAX_MB         max total cache bytes (default 512)
     PICTURA_MAX_BODY_MB            max HTTP request/upload body + external image
                                   fetch cap for http/sse (default 16)
+    PICTURA_UPLOAD_TICKET_TTL      upload_image one-time token TTL, seconds
+                                  (default 120)
 
 Client-supplied `lora` ids are restricted to a built-in default allowlist
 (override via PICTURA_LORA_ALLOWLIST); URLs/local paths are rejected and weights
@@ -226,6 +228,35 @@ _FETCH_MAX_HOPS = 5
 # Decoder guard: refuses to decode images above this pixel count (protects
 # against decompression bombs) when loading from uploads / fetched bytes.
 _IMAGE_MAX_PIXELS = 40_000_000
+
+# One-time upload tickets issued by the upload_image MCP tool. token -> expiry
+# (monotonic); consumed on first use. Only authenticated MCP callers can get a
+# ticket, so POST /images/upload never needs a long-lived key from the client.
+_UPLOAD_TICKET_TTL = max(
+    1.0, float(_env("PICTURA_UPLOAD_TICKET_TTL", "120") or 120)
+)
+_UPLOAD_TICKET_MAX = 1024
+_upload_tickets: dict[str, float] = {}
+
+
+def _issue_upload_ticket() -> str:
+    """Create a one-time upload ticket with a short TTL (bounds growth)."""
+    now = time.monotonic()
+    for t in [t for t, exp in _upload_tickets.items() if exp < now]:
+        _upload_tickets.pop(t, None)
+    if len(_upload_tickets) >= _UPLOAD_TICKET_MAX:
+        _upload_tickets.clear()
+    token = secrets.token_urlsafe(32)
+    _upload_tickets[token] = now + _UPLOAD_TICKET_TTL
+    return token
+
+
+def _consume_upload_ticket(token: str) -> bool:
+    """Validate and consume a one-time upload ticket (True on success)."""
+    if not token:
+        return False
+    exp = _upload_tickets.pop(token, None)
+    return exp is not None and exp >= time.monotonic()
 
 
 class _ImageCache:
@@ -1764,6 +1795,59 @@ def _build_server():
         return _image_result(data, name, actual_seed, elapsed, kind="edited image", base=_request_base(ctx))
 
     @server.tool(
+        name="upload_image",
+        title="Upload Image",
+        description=(
+            "Reserve an image upload over http/sse for a local file. Returns a "
+            "one-time URL and token (valid once for a short TTL): then POST the "
+            "image bytes - raw body or multipart/form-data 'file' field - to "
+            "the returned URL with the X-UPLOAD-TOKEN header. Use this to "
+            "upload a local image that edit_image can then take as its source; "
+            "the server never reads host files over http/sse."
+        ),
+    )
+    async def upload_image(
+        filename: Annotated[
+            str,
+            Field(description="Hint for the saved file name (informational)."),
+        ] = "",
+        ctx: Context = None,
+    ) -> list:
+        """Reserve an upload: one-time token + POST target (no long-lived key)."""
+        if _ALLOW_HOST_PATHS:
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        "Local stdio run: no upload needed. Pass the local file "
+                        "path or file:// URI of the image directly to "
+                        "edit_image."
+                    ),
+                )
+            ]
+        token = _issue_upload_ticket()
+        base = _PUBLIC_BASE or _request_base(ctx) or _URL_BASE
+        if not base:
+            return [
+                TextContent(
+                    type="text",
+                    text="upload unavailable: no resolvable base URL",
+                )
+            ]
+        url = f"{base}/images/upload"
+        ttl = int(_UPLOAD_TICKET_TTL)
+        target = filename or "<your-image>"
+        note = (
+            f"Upload reserved (one-time token, valid ~{ttl}s).\n"
+            f'  {{"url":"{url}","token":"{token}","ttl":{ttl}}}\n'
+            f"  curl -X POST {url} -H \"X-UPLOAD-TOKEN: {token}\" "
+            f"--data-binary @{target}\n"
+            f"  (or: curl -X POST {url} -H \"X-UPLOAD-TOKEN: {token}\" "
+            f"-F \"file=@{target}\")"
+        )
+        return [TextContent(type="text", text=note)]
+
+    @server.tool(
         name="server_status",
         title="Server Status",
         description=(
@@ -2129,7 +2213,12 @@ def _attach_http_middleware(
 
     async def _dispatch(request, call_next):
         if request.method == "POST" and request.url.path == "/images/upload":
-            if not _auth_ok(request, token):
+            if not (
+                _auth_ok(request, token)
+                or _consume_upload_ticket(
+                    request.headers.get("x-upload-token", "")
+                )
+            ):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await _upload_image(request)
         if request.url.path.startswith("/images/"):
