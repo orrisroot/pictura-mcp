@@ -6,6 +6,7 @@ deploy/pictura-mcp.env.new
 
 # Python venv / deps / generated images
 .venv/
+.model-cache/
 outputs/
 **/node_modules/
 __pycache__/
