@@ -1475,6 +1475,11 @@ def _image_result(
 # Module-level constants because tool annotations are stringified (postponed
 # evaluation) and must resolve against module globals - enclosing locals are
 # not visible to inspect.signature(eval_str=True).
+_HTTP_AUTH_NOTE = (
+    " Over http/sse, POST /images/upload is API-key protected: upload local "
+    "images via multipart/form-data 'file' with the same API-key header you "
+    "use to authenticate to this server."
+)
 _EDIT_IMAGE_DESC_LOCAL = (
     "Transform an existing image using a text prompt (img2img). Pass the "
     "source as an http(s) URL - a short-lived server image URL (from "
@@ -1506,11 +1511,6 @@ _IMG_FIELD_DESC_REMOTE = (
     "from generate_image / edit_image / POST /images/upload) or an external "
     "image URL (private/loopback addresses are refused). Server host file paths "
     "are not accepted over http/sse."
-)
-_HTTP_AUTH_NOTE = (
-    " Over http/sse, POST /images/upload is API-key protected: upload local "
-    "images via multipart/form-data 'file' with the same API-key header you "
-    "use to authenticate to this server."
 )
 
 
