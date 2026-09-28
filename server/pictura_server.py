@@ -51,11 +51,12 @@ external image URL (fetched server-side with an SSRF guard). It reads host
 image paths only on a local stdio run; over http/sse the server never touches
 the remote host's filesystem.
 
-Source images can also be uploaded with `POST /images/upload` (http/sse only,
-API-key protected): send the raw image bytes or a multipart/form-data `file`
-field in the request body and the
-response is a short-lived `http://<base>/images/<id>` URL that `edit_image`
-accepts and that GET /images/<id> can serve back.
+Source images can also be uploaded over http/sse: call the `upload_image`
+tool to get a one-time token, then POST the raw image bytes or a
+multipart/form-data `file` field to the returned URL with the
+`X-UPLOAD-TOKEN` header. The response is a short-lived
+`http://<base>/images/<id>` URL that `edit_image` accepts and that
+GET /images/<id> can serve back.
 
 Images are never written to disk. On stdio the result is returned inline as
 base64 (ImageContent); over http/sse the result is a short-lived download URL
@@ -1507,9 +1508,10 @@ def _image_result(
 # evaluation) and must resolve against module globals - enclosing locals are
 # not visible to inspect.signature(eval_str=True).
 _HTTP_AUTH_NOTE = (
-    " Over http/sse, POST /images/upload is API-key protected: upload local "
-    "images via multipart/form-data 'file' with the same API-key header you "
-    "use to authenticate to this server."
+    " Over http/sse, upload a local image with the upload_image tool: it "
+    "returns a one-time token (valid once for ~120s) plus the POST URL. "
+    "Send the image bytes there with the X-UPLOAD-TOKEN header; the "
+    "PICTURA_API_KEY header also works on that endpoint."
 )
 _EDIT_IMAGE_DESC_LOCAL = (
     "Transform an existing image using a text prompt (img2img). Pass the "
@@ -1556,9 +1558,9 @@ def _build_server():
             "inline as base64 ImageContent (decode the data field if your "
             "client cannot render it); over http/sse the result note contains a "
             "short-lived download URL that the client must fetch and save - the "
-            "server never writes files. POST /images/upload is API-key "
-            "protected: send the API-key header you use to authenticate to this "
-            "server."
+            "server never writes files. Upload a local image with the "
+            "upload_image tool, then POST the bytes to the returned URL with "
+            "the X-UPLOAD-TOKEN header."
         ),
     )
 

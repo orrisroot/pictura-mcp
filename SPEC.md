@@ -179,17 +179,18 @@ python server/pictura_server.py [options]
 
 - http → endpoint `/mcp` (streamable HTTP, JSON responses)
 - sse → endpoint `/sse`
-- **Image upload**: `POST /images/upload` accepts raw image bytes or a
-  multipart/form-data `file` field (API-key protected, body capped by
-  `--max-body-mb`) and returns a short-lived
-  `http://<base>/images/<id>` URL; the image is stored in the same in-memory
-  TTL cache and served back by `GET /images/<id>`.
+- **Image upload**: `upload_image` issues a one-time token (TTL
+  `PICTURA_UPLOAD_TICKET_TTL`, default 120 s); POST raw image bytes or a
+  multipart/form-data `file` field to `/images/upload` with the `X-UPLOAD-TOKEN`
+  header (body capped by `--max-body-mb`; the `PICTURA_API_KEY` header is also
+  accepted) and it returns a short-lived `http://<base>/images/<id>` URL; the
+  image is stored in the same in-memory TTL cache and served back by
+  `GET /images/<id>`.
 - **Image downloads**: `GET /images/<id>` serves cached generated / uploaded
   images (see §1 / §6). Set `PICTURA_PUBLIC_URL` when binding `0.0.0.0` or
   behind NAT / a reverse proxy so the URLs returned to clients are reachable;
   without it the server falls back to inline (base64) results. Result download
-  URLs are short-lived capability links that the client fetches and saves;
-  `POST /images/upload` is API-key protected.
+  URLs are short-lived capability links that the client fetches and saves.
 - **Image return mode**: stdio → inline base64; http/sse → short-lived URL
   (URL only; no inline bytes), unless no public base is resolvable (falls back
   to inline).
