@@ -24,7 +24,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 | Remote / headless | ✅ + systemd unit | ✅ (LAN/VPS) | hosted | hosted | hosted |
 | Auth on your server | ✅ API key (PICTURA_API_KEY header) | ⚠️ not emphasized (LAN) | platform auth | platform API key | platform API key |
 | Server stateless (no files kept on host) | ✅ always (stdio: inline base64 / http-sse: short-lived download URL, RAM cache) | ⚠️ writes files/workflows | n/a | `local` output mode writes to disk | n/a (URLs on CDN) |
-| Image input size cap | **16 MB** upload/fetch cap, tunable via `PICTURA_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
+| Image input size cap | **16 MB** upload/fetch cap, tunable via `PICTURA_IMAGE_MAX_BODY_MB` / `--max-body-mb` | depends on upload | platform | URL/base64 support | CDN upload flow |
 | Ecosystem / maturity | self-maintained, small | very large (Civitai workflows, plugins) | vendor, large | growing | large (600+ models) |
 
 ## 2. Where this project wins
@@ -43,7 +43,7 @@ Comparison sources: this repo (`SPEC.md`) + official docs surfaced via context7
 - **Generous image input**: source images are uploaded as raw bytes or a
   multipart `file` field, or referenced by URL (no base64 inflation);
   `--max-body-mb` /
-  `PICTURA_MAX_BODY_MB` cap uploads and external fetches at **16 MB** by
+  `PICTURA_IMAGE_MAX_BODY_MB` cap uploads and external fetches at **16 MB** by
   default — headroom over the ~1.6 MB outputs and typical camera JPEGs. Raise
   the cap only if you pass very large sources.
 

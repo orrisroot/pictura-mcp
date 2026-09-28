@@ -165,7 +165,7 @@ You can also run the server as an independent process that clients reach over
   request via the **`PICTURA_API_KEY`** header; **always set it when the server
   is reachable beyond localhost**
 - **Uploading source images**: call the `upload_image` tool over http/sse — it
-  returns a **one-time token** (TTL `PICTURA_UPLOAD_TICKET_TTL`, default 120 s)
+  returns a **one-time token** (TTL `PICTURA_IMAGE_UPLOAD_TICKET_TTL`, default 120 s)
   and a ready-to-run `curl` line; then POST the raw image bytes or a
   multipart/form-data `file` field to the returned `/images/upload` URL with
   the `X-UPLOAD-TOKEN` header (body capped by `--max-body-mb`). This returns a
@@ -190,8 +190,8 @@ You can also run the server as an independent process that clients reach over
 - Image URLs over http/sse are built from the request's `Host` header by
   default (reverse-proxy friendly), so **`PICTURA_PUBLIC_URL` is usually not
   needed**; set it only to force a specific externally visible base (e.g.
-  behind NAT). Troubleshooting knobs: `PICTURA_IMAGE_URL_TTL` (600 s),
-  `PICTURA_IMAGE_URL_MAX` (64), `PICTURA_IMAGE_URL_MAX_MB` (512).
+  behind NAT). Troubleshooting knobs: `PICTURA_IMAGE_CACHE_TTL` (600 s),
+  `PICTURA_IMAGE_CACHE_MAX` (64), `PICTURA_IMAGE_CACHE_MAX_MB` (512).
 
 Remote client config (`deploy/mcp.remote.json.example`):
 

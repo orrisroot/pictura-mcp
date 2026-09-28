@@ -28,13 +28,13 @@ Configuration (environment variables):
 URL image return (http/sse only):
     PICTURA_PUBLIC_URL              externally visible base URL; default = the
                                   request's Host header (reverse-proxy friendly)
-    PICTURA_IMAGE_URL_TTL            short-term cache lifetime for image URLs, seconds
+    PICTURA_IMAGE_CACHE_TTL         short-term cache lifetime for image URLs, seconds
                                   (default 600)
-    PICTURA_IMAGE_URL_MAX            max cached images (default 64)
-    PICTURA_IMAGE_URL_MAX_MB         max total cache bytes (default 512)
-    PICTURA_MAX_BODY_MB            max HTTP request/upload body + external image
+    PICTURA_IMAGE_CACHE_MAX         max cached images (default 64)
+    PICTURA_IMAGE_CACHE_MAX_MB      max total cache bytes (default 512)
+    PICTURA_IMAGE_MAX_BODY_MB       max HTTP request/upload body + external image
                                   fetch cap for http/sse (default 16)
-    PICTURA_UPLOAD_TICKET_TTL      upload_image one-time token TTL, seconds
+    PICTURA_IMAGE_UPLOAD_TICKET_TTL  upload_image one-time token TTL, seconds
                                   (default 120)
 
 Client-supplied `lora` ids are restricted to a built-in default allowlist
@@ -197,7 +197,7 @@ if CACHE_DIR:
     os.environ.setdefault("HF_HUB_CACHE", str(Path(CACHE_DIR) / "hub"))
 
 # --------------------------------------------------------------------------
-# URL image return + short-term in-memory cache (http/sse only)
+# Image delivery: short-term in-memory cache + download-URL return (http/sse)
 # --------------------------------------------------------------------------
 # Over http/sse each generated image is stored in an in-memory cache for a
 # short TTL and the tool result returns an unguessable download URL (server
@@ -205,10 +205,10 @@ if CACHE_DIR:
 # /images/upload and the server-image URLs that edit_image accepts. Images are
 # never written to disk: the cache lives only in RAM and vanishes with the
 # process.
-_URL_TTL = float(_env("PICTURA_IMAGE_URL_TTL", "600") or 600)
-_URL_MAX = max(1, int(_env("PICTURA_IMAGE_URL_MAX", "64") or 64))
-_URL_MAX_BYTES = max(
-    1, int(_env("PICTURA_IMAGE_URL_MAX_MB", "512") or 512)
+_CACHE_TTL = float(_env("PICTURA_IMAGE_CACHE_TTL", "600") or 600)
+_CACHE_MAX = max(1, int(_env("PICTURA_IMAGE_CACHE_MAX", "64") or 64))
+_CACHE_MAX_BYTES = max(
+    1, int(_env("PICTURA_IMAGE_CACHE_MAX_MB", "512") or 512)
 )* 1024 * 1024
 # Explicit public base for image URLs. If unset, the base is derived from the
 # incoming request (reverse proxy Host / X-Forwarded-Proto), falling back to
@@ -217,7 +217,7 @@ _PUBLIC_BASE = (_env("PICTURA_PUBLIC_URL") or "").strip().rstrip("/") or None
 
 # HTTP request-body cap (MB) for http/sse: bounds POST /images/upload bodies
 # and external image fetches. CLI --max-body-mb overrides at startup.
-_DEFAULT_MAX_BODY_MB = max(1, int(_env("PICTURA_MAX_BODY_MB", "16") or 16))
+_DEFAULT_MAX_BODY_MB = max(1, int(_env("PICTURA_IMAGE_MAX_BODY_MB", "16") or 16))
 _MAX_BODY_BYTES = _DEFAULT_MAX_BODY_MB * 1024 * 1024
 # Timeout / hop limits for fetching external source images in edit_image.
 _FETCH_TIMEOUT = 30
@@ -230,7 +230,7 @@ _IMAGE_MAX_PIXELS = 40_000_000
 # (monotonic); consumed on first use. Only authenticated MCP callers can get a
 # ticket, so POST /images/upload never needs a long-lived key from the client.
 _UPLOAD_TICKET_TTL = max(
-    1.0, float(_env("PICTURA_UPLOAD_TICKET_TTL", "120") or 120)
+    1.0, float(_env("PICTURA_IMAGE_UPLOAD_TICKET_TTL", "120") or 120)
 )
 _UPLOAD_TICKET_MAX = 1024
 _upload_tickets: dict[str, float] = {}
@@ -305,7 +305,7 @@ class _ImageCache:
         return self._ttl
 
 
-_img_cache = _ImageCache(_URL_MAX, _URL_MAX_BYTES, _URL_TTL)
+_img_cache = _ImageCache(_CACHE_MAX, _CACHE_MAX_BYTES, _CACHE_TTL)
 # Image return mode: "url" for http/sse (result is a short-lived download URL),
 # "inline" for stdio (base64 ImageContent). Set in main() from the transport.
 _RETURN_MODE = "inline"
@@ -2031,7 +2031,7 @@ def main() -> int:  # noqa: C901
     parser.add_argument(
         "--max-body-mb",
         type=int,
-        default=int(_env("PICTURA_MAX_BODY_MB", "16") or "16"),
+        default=int(_env("PICTURA_IMAGE_MAX_BODY_MB", "16") or "16"),
         help="max HTTP request body size in MB for http/sse (default 16)",
     )
     parser.add_argument(

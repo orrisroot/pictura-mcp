@@ -87,7 +87,7 @@ Edits an existing image with a prompt (img2img).
 | `filename` | string | `""` | informational hint for the saved file name |
 
 Reserves an upload over http/sse: returns a **one-time token** (TTL
-`PICTURA_UPLOAD_TICKET_TTL`, default 120 s, single use) plus the
+`PICTURA_IMAGE_UPLOAD_TICKET_TTL`, default 120 s, single use) plus the
 `POST /images/upload` URL and a ready-to-run `curl` line. The client then POSTs
 the image bytes (raw or multipart `file`) with the `X-UPLOAD-TOKEN` header —
 no long-lived API key is used on the upload request. The `PICTURA_API_KEY`
@@ -109,7 +109,7 @@ Reports `model`, `device`, `dtype`, `offload`, `weights_gb`, `vram_gb`,
 **All tools return**: over **stdio** an `ImageContent` (base64 PNG, mime
 `image/png`) + a `TextContent` note; over **http/sse** a single `TextContent`
 note containing a short-lived download URL (`http://<base>/images/<id>`, TTL
-`PICTURA_IMAGE_URL_TTL`, default 600 s). On failure a text error is returned.
+`PICTURA_IMAGE_CACHE_TTL`, default 600 s). On failure a text error is returned.
 
 ---
 
@@ -180,7 +180,7 @@ python server/pictura_server.py [options]
 - http → endpoint `/mcp` (streamable HTTP, JSON responses)
 - sse → endpoint `/sse`
 - **Image upload**: `upload_image` issues a one-time token (TTL
-  `PICTURA_UPLOAD_TICKET_TTL`, default 120 s); POST raw image bytes or a
+  `PICTURA_IMAGE_UPLOAD_TICKET_TTL`, default 120 s); POST raw image bytes or a
   multipart/form-data `file` field to `/images/upload` with the `X-UPLOAD-TOKEN`
   header (body capped by `--max-body-mb`; the `PICTURA_API_KEY` header is also
   accepted) and it returns a short-lived `http://<base>/images/<id>` URL; the
@@ -221,7 +221,7 @@ python server/pictura_server.py [options]
   `--max-body-mb` and a 30 s timeout. Server `/images/<id>` URLs resolve from
   the in-memory cache without network.
 - **Image URLs are capability links**: each generated/uploaded-image URL embeds
-  an unguessable id (192-bit random) and expires after `PICTURA_IMAGE_URL_TTL`;
+  an unguessable id (192-bit random) and expires after `PICTURA_IMAGE_CACHE_TTL`;
   images are cached in RAM only (never on disk) and vanish with the process.
   `POST /images/upload` accepts a one-time `X-UPLOAD-TOKEN` (from
   `upload_image`) or the configured API key, unlike `GET /images/<id>`, which
@@ -245,13 +245,13 @@ python server/pictura_server.py [options]
 | `PICTURA_SKIP_PREFETCH` | unset | `1` = skip pre-downloading allowlisted models at startup |
 | `PICTURA_MAX_CONCURRENT` | `auto` | render slot pool size: integer pins it, `1` = strictly serial, `auto` = sized from free VRAM |
 | `PICTURA_PUBLIC_URL` | unset (request Host) | force the externally visible base URL for image links; default = the request's `Host` header |
-| `PICTURA_IMAGE_URL_TTL` | `600` | seconds an image download URL stays valid |
-| `PICTURA_IMAGE_URL_MAX` | `64` | max images kept in the in-memory URL cache |
-| `PICTURA_IMAGE_URL_MAX_MB` | `512` | max total bytes of the URL cache |
+| `PICTURA_IMAGE_CACHE_TTL` | `600` | seconds an image download URL stays valid |
+| `PICTURA_IMAGE_CACHE_MAX` | `64` | max images kept in the in-memory URL cache |
+| `PICTURA_IMAGE_CACHE_MAX_MB` | `512` | max total bytes of the URL cache |
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
-| `PICTURA_MAX_BODY_MB` | `16` | body cap for http/sse; bounds image uploads and external image fetches |
-| `PICTURA_UPLOAD_TICKET_TTL` | `120` | upload ticket TTL (seconds) from `upload_image` |
+| `PICTURA_IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse; bounds image uploads and external image fetches |
+| `PICTURA_IMAGE_UPLOAD_TICKET_TTL` | `120` | upload ticket TTL (seconds) from `upload_image` |
 | `PICTURA_API_KEY` | unset | API key; clients send it in the `PICTURA_API_KEY` header; fallback when `--api-key` not given |
 | `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
 
@@ -262,7 +262,7 @@ python server/pictura_server.py [options]
 Source images are bounded server-side: `POST /images/upload` bodies and
 external image fetches use the `--max-body-mb` cap (default **16 MB**), plenty
 above the ~1.6 MB outputs and typical camera JPEGs. Raise
-`PICTURA_MAX_BODY_MB` / `--max-body-mb` only if you really pass very large
+`PICTURA_IMAGE_MAX_BODY_MB` / `--max-body-mb` only if you really pass very large
 sources. Stdio (local) has no body cap.
 
 Generation and edit sizes stay at the native-bucket level (~1MP), so compute
