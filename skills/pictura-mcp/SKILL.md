@@ -97,7 +97,10 @@ edit_image(
 - **On a local stdio run** you may pass a **host file path** or `file://` URI.
 - **Uploading a local file over http/sse**: `POST /images/upload` with the
   image bytes in the body (raw, or multipart `file` field) returns
-  `{"image": ".../images/<id>", ...}` — pass that URL to `edit_image`.
+  `{"image": ".../images/<id>", ...}` — pass that URL to `edit_image`. Send it
+  with the **same API-key header you use to authenticate to this MCP server**.
+- **Downloading results over http/sse**: the download URLs are short-lived
+  capability links; fetch and save them.
 - To chain an edit onto a generation: use the download URL from the
   `generate_image` result, or save the returned image locally and pass its
   path (stdio).

@@ -174,7 +174,9 @@ python server/pictura_server.py [options]
 - **Image downloads**: `GET /images/<id>` serves cached generated / uploaded
   images (see §1 / §6). Set `PICTURA_PUBLIC_URL` when binding `0.0.0.0` or
   behind NAT / a reverse proxy so the URLs returned to clients are reachable;
-  without it the server falls back to inline (base64) results.
+  without it the server falls back to inline (base64) results. Result download
+  URLs are short-lived capability links that the client fetches and saves;
+  `POST /images/upload` is API-key protected.
 - **Image return mode**: stdio → inline base64; http/sse → short-lived URL
   (URL only; no inline bytes), unless no public base is resolvable (falls back
   to inline).

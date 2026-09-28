@@ -1484,6 +1484,7 @@ _EDIT_IMAGE_DESC_LOCAL = (
     "result is the edited image inline as base64 PNG (ImageContent); over "
     "http/sse the result note contains a short-lived download URL - the "
     "client fetches and saves it. Nothing is written to the server disk."
+    + _HTTP_AUTH_NOTE
 )
 _EDIT_IMAGE_DESC_REMOTE = (
     "Transform an existing image using a text prompt (img2img). Pass the "
@@ -1492,6 +1493,7 @@ _EDIT_IMAGE_DESC_REMOTE = (
     "external image URL (private/loopback addresses are refused). The result "
     "note contains a short-lived download URL - the client fetches and saves "
     "it. Nothing is written to the server disk."
+    + _HTTP_AUTH_NOTE
 )
 _IMG_FIELD_DESC_LOCAL = (
     "Source image: an http(s) URL - a server image URL (http://<host>/images/<id> "
@@ -1505,6 +1507,11 @@ _IMG_FIELD_DESC_REMOTE = (
     "image URL (private/loopback addresses are refused). Server host file paths "
     "are not accepted over http/sse."
 )
+_HTTP_AUTH_NOTE = (
+    " Over http/sse, POST /images/upload is API-key protected: upload local "
+    "images via multipart/form-data 'file' with the same API-key header you "
+    "use to authenticate to this server."
+)
 
 
 def _build_server():
@@ -1514,11 +1521,13 @@ def _build_server():
         title="Image Generation (SDXL)",
         instructions=(
             "Generate images with a local SDXL (Stable Diffusion XL) pipeline "
-            "running on the host GPU. Tools return images inline as base64 "
-            "ImageContent; the server never writes files - the client saves "
-            "them. If your client does not visually render image content, "
-            "decode the returned base64 (data field, image/png) into a file "
-            "with your filesystem tools and open it to inspect the result."
+            "running on the host GPU. Over stdio the tool result is the image "
+            "inline as base64 ImageContent (decode the data field if your "
+            "client cannot render it); over http/sse the result note contains a "
+            "short-lived download URL that the client must fetch and save - the "
+            "server never writes files. POST /images/upload is API-key "
+            "protected: send the API-key header you use to authenticate to this "
+            "server."
         ),
     )
 
@@ -1531,6 +1540,7 @@ def _build_server():
             "(ImageContent); over http/sse the result note contains a short-lived "
             "download URL for the client to fetch and save. Nothing is written "
             "to the server disk."
+            + _HTTP_AUTH_NOTE
         ),
     )
     async def generate_image(

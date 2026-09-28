@@ -41,7 +41,9 @@ are returned depends on the transport:
   URL** (e.g. `http://<host>:8000/images/<unguessable-id>`); the client fetches
   it with HTTP tools and saves it — no shared filesystem needed. Each URL is
   valid for a short TTL (default 600 s) from a small in-memory cache; nothing
-  is persisted.
+  is persisted. Result download URLs are **short-lived capability links** that
+  the client fetches and saves. `POST /images/upload` is API-key protected and
+  needs the same API-key header as the MCP connection (multipart `file`).
 
 The tool descriptions and the result note explain this on every call.
 
