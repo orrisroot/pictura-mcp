@@ -23,7 +23,7 @@ any MCP client ──(stdio | streamable HTTP | SSE)──▶ pictura_server.py 
 | `upload_image` | local file → upload reservation (one-time token + POST URL; http/sse; stdio: pass the path to `edit_image`) |
 | `list_loras` | allowlisted LoRA ids (for `lora`) |
 | `list_control_types` | abstract ControlNet types (for `control_type`) |
-| `server_status` | model / device / VRAM info |
+| `server_status` | model + image-size policy (stdio adds device / VRAM etc.) |
 
 Both generation tools accept optional **LoRA** adapters, and `edit_image`
 additionally supports **ControlNet** via an abstract `control_type` (see
@@ -161,9 +161,9 @@ You can also run the server as an independent process that clients reach over
 
 - `--transport http` (endpoint `/mcp`) or `--transport sse` (endpoint `/sse`);
   `--host 127.0.0.1` is the safe default — use `0.0.0.0` for remote clients
-- `--api-key <key>` (or env `PICTURA_API_KEY`) requires the API key on every
-  request via the **`PICTURA_API_KEY`** header; **always set it when the server
-  is reachable beyond localhost**
+- `--api-key <key>` (or env `PICTURA_API_KEY`): **required for http/sse** — the
+  server refuses to start without it (remote users authenticate via the
+  **`PICTURA_API_KEY`** header)
 - **Uploading source images**: call the `upload_image` tool over http/sse — it
   returns a **one-time token** (TTL `PICTURA_IMAGE_UPLOAD_TICKET_TTL`, default 120 s)
   and a ready-to-run `curl` line; then POST the raw image bytes or a
@@ -187,10 +187,11 @@ You can also run the server as an independent process that clients reach over
   download URL** (served from an in-memory TTL cache at `GET /images/<id>`);
   uploaded images live in the same cache. Over stdio results are returned
   inline as base64. Clients save the image wherever they like.
-- Image URLs over http/sse are built from the request's `Host` header by
-  default (reverse-proxy friendly); set **`PICTURA_PUBLIC_URL`** to force a
-  specific externally visible base - needed when a reverse proxy serves the
-  server under a path prefix (e.g. `/llm/pictura`). Troubleshooting knobs:
+- **`PICTURA_PUBLIC_URL` is required when binding a non-loopback address**
+  (the server refuses to start without it): set it to the externally visible
+  base, including any path prefix when a reverse proxy serves the server
+  (e.g. `https://www.ni.riken.jp/llm/pictura`). On loopback it falls back to
+  the request `Host`. Troubleshooting knobs:
   `PICTURA_IMAGE_CACHE_TTL` (600 s), `PICTURA_IMAGE_CACHE_MAX` (64),
   `PICTURA_IMAGE_CACHE_MAX_MB` (512).
 
@@ -230,8 +231,10 @@ The installer prints the next steps; the essentials are already prepared:
 
 - `deploy/pictura-mcp.env` is created from the template with an
   **auto-randomized `PICTURA_API_KEY`**, and `PICTURA_MODEL_CACHE_DIR` /
-  `PICTURA_HOST=0.0.0.0` / `PICTURA_PORT` are **pre-seeded** — edit only what needs
-  changing (`sudoedit deploy/pictura-mcp.env`; e.g. `PICTURA_MODEL`,
+  `PICTURA_HOST=0.0.0.0` / `PICTURA_PORT` / `PICTURA_PUBLIC_URL` (this host's
+  IP:port — edit it to the public URL behind a reverse proxy) are
+  **pre-seeded** — edit only what needs changing
+  (`sudoedit deploy/pictura-mcp.env`; e.g. `PICTURA_MODEL`,
   `PICTURA_CUDA_DEVICE`, `PICTURA_LOG_FILE`)
 - start and verify:
 
@@ -269,8 +272,9 @@ read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>
 fingerprint of `deploy/pictura-mcp.env.example` in the env file. When the
 template changes, your `deploy/pictura-mcp.env` is left untouched and the
 current rendered template is written to **`deploy/pictura-mcp.env.new`**
-(machine values such as cache / host / port pre-filled, and the `PICTURA_API_KEY`
-carried over from your env so merging it keeps clients working). Diff & merge
+(machine values such as cache / host / port / public URL pre-filled, and the
+`PICTURA_API_KEY` carried over from your env so merging it keeps clients
+working). Diff & merge
 what you want, delete the file, then run **`deploy/install-systemd.sh
 --adopt-env`** (a standalone step: records the template and removes the `.new`
 file, no reinstall). The API key is generated on first install and kept
@@ -385,9 +389,15 @@ Requires the `peft` dependency (listed in `server/requirements.txt`).
   to disable.
 - Download location: `PICTURA_MODEL_CACHE_DIR` (default: the Hugging Face cache).
 
+## Development checks
+
+`bash scripts/check.sh` compiles and imports the server and verifies that docs
+stay in sync (tool / env-var names, no stale wording, env example safe for
+systemd). No GPU or model download needed.
+
 ## Docs
 
 - `SPEC.md` — full technical specification
-- `COMPARISON.md` — feature comparison vs other image-gen MCPs
 - `skills/` — distributable **Agent Skill** (`pictura-mcp`) for end-user agents (see `skills/README.md`)
 - `deploy/` — configuration templates + systemd unit
+- `scripts/check.sh` — lightweight dev checks (no GPU needed)

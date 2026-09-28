@@ -90,8 +90,10 @@ Reserves an upload over http/sse: returns a **one-time token** (TTL
 `PICTURA_IMAGE_UPLOAD_TICKET_TTL`, default 120 s, single use) plus the
 `POST /images/upload` URL and a ready-to-run `curl` line. The client then POSTs
 the image bytes (raw or multipart `file`) with the `X-UPLOAD-TOKEN` header —
-no long-lived API key is used on the upload request. The `PICTURA_API_KEY`
-header is also accepted (direct/LAN clients).
+no long-lived API key is used on the upload request. The token is claimed at
+POST time (a concurrent POST with the same token is rejected), consumed only
+after a successful upload, and released for retry when the upload fails. The
+`PICTURA_API_KEY` header is also accepted (direct/LAN clients).
 
 ### `list_loras`
 Returns the allowlisted LoRA ids valid for the `lora` parameter.
@@ -101,10 +103,10 @@ Returns the abstract ControlNet types valid for `control_type`, with short
 guidance. **No model identifiers are exposed** (they stay server-side).
 
 ### `server_status`
-Reports `model`, `device`, `dtype`, `offload`, `weights_gb`, `vram_gb`,
-`concurrency_slots`, `load_seconds`, `size_policy` (snap to SDXL ~1MP buckets,
-≥256, multiple of 8), `snap_buckets` (number of SDXL ~1MP buckets) and
-`native_size`.
+Reports `model` and the image-size policy (`size_policy`, `snap_buckets`,
+`native_size`). On a local stdio run it additionally reports the internal
+`device`, `dtype`, `offload`, `weights_gb`, `vram_gb`, `concurrency_slots` and
+`load_seconds`; over **http/sse** those are not exposed.
 
 **All tools return**: over **stdio** an `ImageContent` (base64 PNG, mime
 `image/png`) + a `TextContent` note; over **http/sse** a single `TextContent`
@@ -173,7 +175,7 @@ python server/pictura_server.py [options]
 | `--transport stdio\|http\|sse` | `stdio` | MCP transport |
 | `--host` | `127.0.0.1` | bind address (use `0.0.0.0` for remote) |
 | `--port` | `8000` | TCP port |
-| `--api-key <key>` | none | require the API key (http/sse) via the `PICTURA_API_KEY` header |
+| `--api-key <key>` | — | **required for http/sse**; remote clients send it via the `PICTURA_API_KEY` header |
 | `--max-body-mb <n>` | 16 | max HTTP request body (http/sse); bounds image uploads and external image fetches |
 | `--log-file <path>` | stderr | append `[pictura-mcp]` logs to a file (also `$PICTURA_LOG_FILE`) |
 | `--smoke` | — | self-test (txt2img + img2img) writing to `<repo>/outputs/` |
@@ -188,10 +190,11 @@ python server/pictura_server.py [options]
   image is stored in the same in-memory TTL cache and served back by
   `GET /images/<id>`.
 - **Image downloads**: `GET /images/<id>` serves cached generated / uploaded
-  images (see §1 / §6). Set `PICTURA_PUBLIC_URL` when binding `0.0.0.0` or
-  behind NAT / a reverse proxy so the URLs returned to clients are reachable;
-  without it the server falls back to inline (base64) results. Result download
-  URLs are short-lived capability links that the client fetches and saves.
+  images (see §1 / §6). `PICTURA_PUBLIC_URL` is required when binding a
+  non-loopback address (the server refuses to start without it) so the URLs
+  returned to clients are reachable; on loopback the request `Host` is used.
+  Result download URLs are short-lived capability links that the client
+  fetches and saves.
 - **Image return mode**: stdio → inline base64; http/sse → short-lived URL
   (URL only; no inline bytes), unless no public base is resolvable (falls back
   to inline).
@@ -200,9 +203,19 @@ python server/pictura_server.py [options]
 
 ## 5. Security
 
-- **Remote transports require an API key** (see §6 `PICTURA_API_KEY`, sent via
-  the `PICTURA_API_KEY` header) when the server is exposed beyond localhost.
-  The GPU is otherwise reachable by any caller.
+- **Remote transports require an API key**: http/sse refuses to start without
+  one (`--api-key` / `PICTURA_API_KEY`); the GPU is otherwise reachable by any
+  caller.
+- **Non-loopback http/sse requires `PICTURA_PUBLIC_URL`** (refuses to start):
+  the externally visible base (scheme + host + any path prefix) so returned
+  image URLs are reachable behind reverse proxies. On loopback it falls back
+  to the request `Host`.
+- **`server_status` leaks no internal state over http/sse**: only `model` and
+  the image-size policy are reported remotely (device / dtype / VRAM / slots /
+  load time are local stdio-only).
+- **Upload tickets are one-shot and concurrency-safe**: a ticket is consumed
+  only after a successful upload; a failed upload releases it for retry, and a
+  concurrent POST using the same token is rejected (401).
 - **Arbitrary-path writes are impossible**: tools accept no output path; the
   server never persists files.
 - **Privacy**: user prompts and tool arguments are **never written to logs**
@@ -245,7 +258,7 @@ python server/pictura_server.py [options]
 | `PICTURA_CONTROLNET_ALLOWLIST` | built-in default | override ControlNet allowlist (same semantics) |
 | `PICTURA_SKIP_PREFETCH` | unset | `1` = skip pre-downloading allowlisted models at startup |
 | `PICTURA_MAX_CONCURRENT` | `auto` | render slot pool size: integer pins it, `1` = strictly serial, `auto` = sized from free VRAM |
-| `PICTURA_PUBLIC_URL` | unset (request Host) | force the externally visible base URL for image links; default = the request's `Host` header |
+| `PICTURA_PUBLIC_URL` | unset | required for non-loopback http/sse binds; externally visible base (scheme + host + path prefix); loopback fallback: request `Host` |
 | `PICTURA_IMAGE_CACHE_TTL` | `600` | seconds an image download URL stays valid |
 | `PICTURA_IMAGE_CACHE_MAX` | `64` | max images kept in the in-memory URL cache |
 | `PICTURA_IMAGE_CACHE_MAX_MB` | `512` | max total bytes of the URL cache |
@@ -364,8 +377,9 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 ```
 README.md                        # usage guide (any MCP client)
 SPEC.md                          # this document
-COMPARISON.md                    # vs other image-gen MCPs
 LICENSE                          # MIT license
+scripts/
+  check.sh                       # lightweight dev checks (no GPU needed)
 deploy/
   mcp.json.example               # client config TEMPLATE (project .mcp.json)
   mcp.remote.json.example        # HTTP client config TEMPLATE
