@@ -223,8 +223,9 @@ python server/pictura_server.py [options]
 - **Image URLs are capability links**: each generated/uploaded-image URL embeds
   an unguessable id (192-bit random) and expires after `PICTURA_IMAGE_URL_TTL`;
   images are cached in RAM only (never on disk) and vanish with the process.
-  `POST /images/upload` requires the API key when configured (unlike
-  `GET /images/<id>`, which is capability-based).
+  `POST /images/upload` accepts a one-time `X-UPLOAD-TOKEN` (from
+  `upload_image`) or the configured API key, unlike `GET /images/<id>`, which
+  is capability-based.
 - No output-directory control is offered: tools accept no output path and the
   server never persists images.
 
@@ -243,8 +244,7 @@ python server/pictura_server.py [options]
 | `PICTURA_CONTROLNET_ALLOWLIST` | built-in default | override ControlNet allowlist (same semantics) |
 | `PICTURA_SKIP_PREFETCH` | unset | `1` = skip pre-downloading allowlisted models at startup |
 | `PICTURA_MAX_CONCURRENT` | `auto` | render slot pool size: integer pins it, `1` = strictly serial, `auto` = sized from free VRAM |
-| `PICTURA_PUBLIC_URL` | unset (request Host) | force the externally visible base URL for image links; default = the request's `Host` header (X-Forwarded-Proto honored when uvicorn trusts the proxy) |
-| `PICTURA_FORWARDED_ALLOW_IPS` | `127.0.0.1` | uvicorn `--forwarded-allow-ips`; set to the reverse proxy's IP when it is not on localhost |
+| `PICTURA_PUBLIC_URL` | unset (request Host) | force the externally visible base URL for image links; default = the request's `Host` header |
 | `PICTURA_IMAGE_URL_TTL` | `600` | seconds an image download URL stays valid |
 | `PICTURA_IMAGE_URL_MAX` | `64` | max images kept in the in-memory URL cache |
 | `PICTURA_IMAGE_URL_MAX_MB` | `512` | max total bytes of the URL cache |

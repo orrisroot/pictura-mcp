@@ -20,13 +20,16 @@ any MCP client ──(stdio | streamable HTTP | SSE)──▶ pictura_server.py 
 |---|---|
 | `generate_image` | text → image (SDXL default) |
 | `edit_image` | image → image (img2img / edit from a prompt) |
+| `upload_image` | local file → upload reservation (one-time token + POST URL; http/sse; stdio: pass the path to `edit_image`) |
 | `list_loras` | allowlisted LoRA ids (for `lora`) |
 | `list_control_types` | abstract ControlNet types (for `control_type`) |
 | `server_status` | model / device / VRAM info |
 
 Both generation tools accept optional **LoRA** adapters, and `edit_image`
 additionally supports **ControlNet** via an abstract `control_type` (see
-[LoRA & ControlNet](#lora--controlnet)). Parameter meaning and value formats are
+[LoRA & ControlNet](#lora--controlnet)). The `upload_image` reservation flow
+applies over http/sse; on a local stdio run the tool instead tells you to pass
+the file path to `edit_image` directly. Parameter meaning and value formats are
 embedded in each tool's input schema (visible to MCP clients); `list_loras` /
 `list_control_types` return the valid values, and ControlNet model identifiers
 stay server-side.
@@ -188,9 +191,7 @@ You can also run the server as an independent process that clients reach over
   default (reverse-proxy friendly), so **`PICTURA_PUBLIC_URL` is usually not
   needed**; set it only to force a specific externally visible base (e.g.
   behind NAT). Troubleshooting knobs: `PICTURA_IMAGE_URL_TTL` (600 s),
-  `PICTURA_IMAGE_URL_MAX` (64), `PICTURA_IMAGE_URL_MAX_MB` (512), and
-  `PICTURA_FORWARDED_ALLOW_IPS` (uvicorn's forwarded-allow-ips, default
-  `127.0.0.1`) when a reverse proxy sits on another host.
+  `PICTURA_IMAGE_URL_MAX` (64), `PICTURA_IMAGE_URL_MAX_MB` (512).
 
 Remote client config (`deploy/mcp.remote.json.example`):
 
@@ -319,8 +320,9 @@ runtime also auto-offloads and retries.
   (SSRF-guarded: private/loopback addresses are refused). On a **local stdio
   run** you may also pass a **host file path** or `file://` URI; over
   http/sse the server never reads host files.
-  To edit a local image against a remote server, upload it first with
-  `POST /images/upload` to get a server image URL.
+  To edit a local image against a remote server, call the `upload_image`
+  tool first and POST the bytes with the returned `X-UPLOAD-TOKEN` (see
+  **Uploading source images** above) to get a server image URL.
 - **`strength`** (0..1, default 0.6): higher = larger change
 - **`width`/`height`** (0 = keep source size; any value is snapped to the
   nearest SDXL ~1MP training bucket — including 0, so the output aspect can

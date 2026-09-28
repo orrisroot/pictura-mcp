@@ -26,6 +26,7 @@ as `mcp__generate_image`). The canonical names are:
 |---|---|
 | `generate_image` | text → image |
 | `edit_image` | image → image (edit) |
+| `upload_image` | local file → one-time upload reservation (http/sse; stdio: use local path) |
 | `list_loras` | valid LoRA ids for the `lora` parameter |
 | `list_control_types` | valid abstract ControlNet types for `control_type` |
 | `server_status` | model / device / VRAM info |
