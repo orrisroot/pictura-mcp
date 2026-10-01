@@ -1150,12 +1150,12 @@ def _apply_loras(pipe, spec: str) -> None:
     The spec is comma-separated 'huggingface/model:weight' entries (weight
     defaults to 1.0). Adapters are downloaded from the HF cache.
     """
+    try:
+        pipe.unload_lora_weights()
+    except Exception:  # noqa: BLE001
+        pass
     entries = _parse_lora(spec)
     if not entries:
-        try:
-            pipe.unload_lora_weights()
-        except Exception:  # noqa: BLE001
-            pass
         return
     names, weights = [], []
     for i, (mid, weight) in enumerate(entries):
