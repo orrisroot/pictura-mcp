@@ -415,6 +415,7 @@ _SLOT_CAP = 3                 # safety cap in "auto" mode
 
 _slots: list = []             # slots in the pool (slot 0 first, built lazily)
 _BUILD_LOCK = threading.Lock()  # serialize pipeline construction (RAM / disk cache)
+_LORA_LOCK = threading.Lock()   # serialize adapter loads across slots
 _rr_next = 0                  # rotating acquisition start index
 
 
@@ -1157,16 +1158,21 @@ def _apply_loras(pipe, spec: str) -> None:
     entries = _parse_lora(spec)
     if not entries:
         return
-    names, weights = [], []
-    for i, (mid, weight) in enumerate(entries):
-        name = f"lora{i}"
-        _check_model_id("LoRA", mid, "PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
-        pipe.load_lora_weights(
-            mid, adapter_name=name, use_safetensors=True, cache_dir=CACHE_DIR
-        )
-        names.append(name)
-        weights.append(weight)
-    pipe.set_adapters(names, adapter_weights=weights)
+    with _LORA_LOCK:
+        names, weights = [], []
+        for i, (mid, weight) in enumerate(entries):
+            name = f"lora{i}"
+            _check_model_id("LoRA", mid, "PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
+            pipe.load_lora_weights(
+                mid,
+                adapter_name=name,
+                use_safetensors=True,
+                cache_dir=CACHE_DIR,
+                low_cpu_mem_usage=False,
+            )
+            names.append(name)
+            weights.append(weight)
+        pipe.set_adapters(names, adapter_weights=weights)
     # Log only a count - LoRA ids are client tool arguments and must stay out
     # of the logs (privacy guarantee).
     _log(f"LoRA applied: {len(entries)} adapter(s)")
