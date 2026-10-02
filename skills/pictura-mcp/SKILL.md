@@ -13,7 +13,8 @@ license: MIT
 # Pictura MCP
 
 Pictura MCP is a **local, stateless** image-generation MCP server (Stable
-Diffusion, SDXL by default). Images come back to you inline (stdio) or as a
+Diffusion — SDXL or SD3.5, active family from the local model config). Images
+come back to you inline (stdio) or as a
 short-lived download URL (http/sse); the server never writes files, so **you
 save them yourself**.
 

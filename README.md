@@ -70,14 +70,18 @@ one model-load per extra slot.
 python3 -m venv .venv
 ./.venv/bin/pip install -r server/requirements.txt
 
-# 2) Provision the models (deployment step; see "Model configuration")
+# 2) Activate a model preset (deployment-local config; see "Model configuration")
+cp server/examples/model.sd35-large.json server/model.json
+#    use example/model.sdxl.json or model.sd35-medium.json for another family
+
+# 3) Provision the models (deployment step; the service never downloads)
 sudo scripts/fetch-models.sh
 
-# 3) Smoke test
+# 4) Smoke test
 ./.venv/bin/python server/pictura_server.py --smoke
 # -> OK if outputs/smoke_test.png is created
 
-# 4) Connect from your MCP client (see below)
+# 5) Connect from your MCP client (see below)
 ```
 
 ### CUDA driver version
@@ -216,8 +220,13 @@ Remote client config (`deploy/mcp.remote.json.example`):
 
 Prerequisite: §Setup step 1 above — the `.venv`+dependencies must exist at
 `<PROJECT_ROOT>/.venv` (the service runs that interpreter). The manual smoke
-test is optional here; the service never downloads — provision the models
-first (sudo scripts/fetch-models.sh) before starting it.
+test is optional here. Before the first start, activate a model preset and
+provision the weights (the service never downloads):
+
+```bash
+cp server/examples/model.sd35-large.json server/model.json
+sudo scripts/fetch-models.sh
+```
 
 There are two ways to run it as a service.
 
@@ -236,8 +245,9 @@ The installer prints the next steps; the essentials are already prepared:
   `PICTURA_PORT` / `PICTURA_PUBLIC_URL` (this host's IP:port — edit it to the
   public URL behind a reverse proxy) are **pre-seeded** — edit only what needs
   changing (`sudoedit deploy/pictura-mcp.env`; e.g. `PICTURA_MODEL_CONFIG`,
-  `PICTURA_CUDA_DEVICE`, `PICTURA_LOG_FILE`). Provision the models first
-  (`sudo scripts/fetch-models.sh`).
+  `PICTURA_CUDA_DEVICE`, `PICTURA_LOG_FILE`). Activate a preset and provision
+  the models first:
+  `cp server/examples/model.sd35-large.json server/model.json && sudo scripts/fetch-models.sh`.
 - start and verify:
 
 ```bash
@@ -259,11 +269,11 @@ This runs under the unprivileged `pictura-mcp` system account with hardening
 makes the FS read-only, so the installer whitelists the models dir and log
 file in `ReadWritePaths` (derived from `deploy/pictura-mcp.env`; log file is
 0640, owner = service account, group = service account). The installer also
-activates commented-out defaults in the env file (`PICTURA_MODELS_DIR`,
-`PICTURA_HOST`, `PICTURA_PORT`); weights are provisioned ahead of time by
+activates commented-out defaults in the env file (`PICTURA_HOST`,
+`PICTURA_PORT`); weights are provisioned ahead of time by
 `scripts/fetch-models.sh` — the server never downloads. If you later change
-`PICTURA_MODELS_DIR` / `PICTURA_LOG_FILE`, re-run the installer (it re-renders
-the unit and restarts the service). Non-root operators
+`PICTURA_LOG_FILE`, re-run the installer (it re-renders the unit; then
+`systemctl restart pictura-mcp`). Non-root operators
 read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>`
 (then log out/in). If the service crashes at startup, remove
 `MemoryDenyWriteExecute=true` from the unit (torch sometimes conflicts) and
@@ -284,6 +294,9 @@ afterwards.
 **B) Current user (user scope, quick):**
 
 ```bash
+# activate a preset + provision weights (the service never downloads)
+cp server/examples/model.sd35-large.json server/model.json
+sudo scripts/fetch-models.sh
 cp deploy/pictura-mcp.env.example deploy/pictura-mcp.env   # set PICTURA_API_KEY
 chmod 600 deploy/pictura-mcp.env
 mkdir -p ~/.config/systemd/user

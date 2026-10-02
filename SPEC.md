@@ -355,9 +355,11 @@ block above is identical regardless of harness.
 **Tracked vs gitignored:** only templates are committed. Real configs and
 artifacts are gitignored and created locally on each machine (see §11): the
 client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real paths),
-`deploy/pictura-mcp.env` (secrets), `.venv/`, and `outputs/`.
+`deploy/pictura-mcp.env` (secrets), `server/model.json` (copy a preset from
+`server/examples/`), `.venv/`, and `outputs/`.
 
-- **Venv**: `.venv` (@ Python 3.14 + torch 2.14 CUDA). Rebuild with
+- **Venv**: `.venv` (Python 3.12+; `requirements.txt` pins `torch>=2.9,<3.0`,
+  verified on 2.11.0+cu130, CUDA-13-capable driver, ≥580). Rebuild with
   `server/requirements.txt` (needs a CUDA-13-capable driver, ≥580).
   **Volta/V100 (compute capability 7.0) machines**: use
   `server/requirements-v100.txt` (torch 2.7.1+cu126) instead — newer torch
@@ -376,15 +378,18 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 
 ## 10. Verified behavior (tests on this host)
 
-- SDXL load ~3 s cached; 1024×1024/30 ≈ 31 s (CPU-offload), img2img 1024 ≈ 14 s.
+- SD3.5 Large: 1344×768 / 40 steps ≈ 115 s per image (1 slot, proactive CPU
+  offload, ~30/34 GB); depth ControlNet edit ≈ 181 s, canny ≈ 331 s.
+- SD3.5 Large LoRAs verified (Photorealistic, trigger `photorealistic`; Anime,
+  trigger `Anime 35`); `list_loras` returns the supported ids with
+  descriptions.
 - Large camera-JPEG source images accepted for img2img input (bounded by
   `--max-body-mb`).
 - Remote with token: 401 on missing/wrong token; `POST /images/upload` +
   `GET /images/<id>` round-trip OK; initialize + tools/list OK.
-- Bucket snapping (GPU): `generate_image(1152×896)` outputs 1152×896;
-  `generate_image(512×512)` snaps to 1024×1024 (aspect kept); the generated
-  download URL feeds `edit_image` directly (same bucket). `server_status`
-  reports the `size_policy` / `snap_buckets` / `native_size` fields.
+- Bucket snapping: requested sizes snap to the active family's native
+  training buckets; `server_status` reports `size_policy` / `snap_buckets` /
+  `native_size`.
 - Statelessness: `outputs/` unchanged after generation via MCP.
 
 ---
@@ -398,17 +403,19 @@ SPEC.md                          # this document
 LICENSE                          # MIT license
 scripts/
   check.sh                       # lightweight dev checks (no GPU needed)
+  fetch-models.sh                # provision weights (deployment step, needs hf CLI)
 deploy/
   mcp.json.example               # client config TEMPLATE (project .mcp.json)
   mcp.remote.json.example        # HTTP client config TEMPLATE
   pictura-mcp.service              # systemd system-unit TEMPLATE (service account)
   install-systemd.sh             # root installer: account + dirs + unit
-  pictura-mcp.env.example          # env TEMPLATE (token/model/cache/log)
+  pictura-mcp.env.example          # env TEMPLATE (API key / model / serving / log)
   logrotate.example              # logrotate config (copytruncate + SIGHUP option)
 server/
   pictura_server.py                # MCP image server (the implementation)
   requirements.txt               # python deps
   requirements-v100.txt          # python deps for Volta/V100 (torch 2.7.1+cu126)
+  examples/                      # model config PRESETS (model.sdxl / sd35-medium / sd35-large)
 skills/
   README.md                      # Agent Skill install guide
   pictura-mcp/SKILL.md           # the Agent Skill (operating policy for agents)
@@ -418,6 +425,7 @@ skills/
 ```
 .mcp.json                        # YOUR client config - copy deploy/mcp.json.example and fill in
 deploy/pictura-mcp.env            # YOUR secrets - copy deploy/pictura-mcp.env.example, set the token
+server/model.json                 # YOUR model config - copy server/examples/model.sd35-large.json (or another preset)
 .venv/                           # python env - create with: python3 -m venv .venv (+ pip install -r server/requirements.txt; V100: -r server/requirements-v100.txt)
 outputs/                         # created automatically later by: server/pictura_server.py --smoke
 ```
