@@ -534,8 +534,10 @@ def _build_txt(slot):
         if VAE_ID:
             from diffusers import AutoencoderKL
 
-            vae = AutoencoderKL.from_pretrained(VAE_ID, dtype=dtype)
-            pipe = StableDiffusionXLPipeline.from_pretrained(MODEL_ID, vae=vae, **model_kwargs)
+            vae = AutoencoderKL.from_pretrained(VAE_ID, dtype=dtype, low_cpu_mem_usage=False)
+            pipe = StableDiffusionXLPipeline.from_pretrained(
+                MODEL_ID, vae=vae, low_cpu_mem_usage=False, **model_kwargs
+            )
         else:
             pipe = StableDiffusionXLPipeline.from_pretrained(MODEL_ID, **model_kwargs)
     except Exception:
@@ -543,7 +545,9 @@ def _build_txt(slot):
         _log("Initial load failed, retrying with default precision...")
         model_kwargs.pop("dtype", None)
         model_kwargs.pop("vae", None)
-        pipe = StableDiffusionXLPipeline.from_pretrained(MODEL_ID, **model_kwargs)
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            MODEL_ID, low_cpu_mem_usage=False, **model_kwargs
+        )
     slot.txt = pipe
 
     # ---- memory optimizations for low-VRAM cards -----------------------------
@@ -570,7 +574,9 @@ def _build_txt(slot):
             from diffusers import AutoencoderKL
 
             _log("SDXL: using fp16-safe VAE madebyollin/sdxl-vae-fp16-fix")
-            pipe.vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", dtype=dtype)
+            pipe.vae = AutoencoderKL.from_pretrained(
+                "madebyollin/sdxl-vae-fp16-fix", dtype=dtype, low_cpu_mem_usage=False
+            )
         else:
             # User-explicit VAE: keep decode in fp32 to avoid NaN/black output.
             try:
@@ -1242,7 +1248,9 @@ def _preprocess_depth_locked(image):
     if _dpt_model is None:
         _log(f"Loading depth preprocessor {mid} ...")
         _dpt_processor = DPTImageProcessor.from_pretrained(mid, cache_dir=CACHE_DIR)
-        _dpt_model = DPTForDepthEstimation.from_pretrained(mid, cache_dir=CACHE_DIR)
+        _dpt_model = DPTForDepthEstimation.from_pretrained(
+            mid, cache_dir=CACHE_DIR, low_cpu_mem_usage=False
+        )
         _dpt_model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
     enc = _dpt_processor(images=image, return_tensors="pt")
     enc = {k: v.to(_dpt_model.device) for k, v in enc.items()}
@@ -1337,15 +1345,19 @@ def _build_cn(slot, model_id: str):
     _check_model_id("ControlNet", model_id, "PICTURA_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST)
     _log(f"Loading ControlNet model {model_id} (slot {_slots.index(slot)}) ...")
     cn_model = ControlNetModel.from_pretrained(
-        model_id, dtype=dtype, use_safetensors=True, cache_dir=CACHE_DIR
+        model_id, dtype=dtype, use_safetensors=True, cache_dir=CACHE_DIR, low_cpu_mem_usage=False
     )
 
     # SDXL ControlNet img2img with the fp16-safe VAE.
     vae_kwargs = {
-        "vae": AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", dtype=dtype)
+        "vae": AutoencoderKL.from_pretrained(
+            "madebyollin/sdxl-vae-fp16-fix", dtype=dtype, low_cpu_mem_usage=False
+        )
     }
 
-    pipe = cn_cls.from_pretrained(MODEL_ID, controlnet=cn_model, dtype=dtype, **vae_kwargs)
+    pipe = cn_cls.from_pretrained(
+        MODEL_ID, controlnet=cn_model, dtype=dtype, low_cpu_mem_usage=False, **vae_kwargs
+    )
     for fn in ("enable_attention_slicing", "enable_vae_slicing", "enable_vae_tiling"):
         try:
             getattr(pipe, fn)()
