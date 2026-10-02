@@ -5,11 +5,12 @@ MCP client** — Claude Desktop, Cursor, VS Code, Windsurf, Claude Code, etc.
 
 ```
 MCP client ──────────────────▶ pictura_server.py ──────────────▶ GPU
-            (stdio|HTTP|SSE)                      (SDXL/SD3.5)
+            (stdio|HTTP|SSE)                      (SDXL/SD3.5/Qwen-Image 2.1)
 ```
 
 - **Server**: `server/pictura_server.py` — a standard MCP server (stdio / HTTP /
-  SSE) running Stable Diffusion (SDXL / SD3.5) via Hugging Face `diffusers`.
+  SSE) running Stable Diffusion (SDXL / SD3.5) or Qwen-Image 2.1 via Hugging
+  Face `diffusers`.
 - **Client**: whatever MCP client you already use. Examples for several clients
   are in § [Client configuration](#client-configuration).
 
@@ -72,7 +73,7 @@ python3 -m venv .venv
 
 # 2) Activate a model preset (deployment-local config; see "Model configuration")
 cp server/examples/model.sd35-large.json server/model.json
-#    use example/model.sdxl.json or model.sd35-medium.json for another family
+#    use example/model.sdxl.json, model.sd35-medium.json, or model.qwen-image-2.1.json for another family
 
 # 3) Provision the models (deployment step; the service never downloads)
 sudo scripts/fetch-models.sh
@@ -319,13 +320,15 @@ Log rotation: `deploy/logrotate.example` (copytruncate, or SIGHUP postrotate).
 All model settings live in **one file**: `server/model.json` — the base model
 (`model`; local path, relative to the project root, or `org/repo`), an
 optional custom `vae`, **per-family settings** (`families`, keyed by the
-internal id `sdxl` / `sd35-medium` / `sd35-large`: `desc`, `steps`,
+internal id `sdxl` / `sd35-medium` / `sd35-large` / `qwen-image-2.1`:
+`desc`, `steps`,
 `guidance`, `width`/`height`, `buckets`, `auto_vae`), the **supported LoRA
 ids** (`supported_loras`: id → description map) and the **ControlNet types**
 (`control_types`: `pre`/`model`/`prep_model` per type). No other model env
 vars are read. `server/model.json` is **deployment-local and gitignored** like
 `deploy/pictura-mcp.env`: copy a preset from `server/examples/`
-(`model.sdxl.json` / `model.sd35-medium.json` / `model.sd35-large.json`) to
+(`model.sdxl.json` / `model.sd35-medium.json` / `model.sd35-large.json` /
+`model.qwen-image-2.1.json`) to
 `server/model.json`, or point `PICTURA_MODEL_CONFIG` at a preset directly. The
 server refuses to start when the configured model is not a supported family
 (exit 2).
@@ -342,7 +345,10 @@ Manually, one by one (`hf` ships in the project venv):
     ./.venv/bin/hf download stabilityai/stable-diffusion-3.5-large --local-dir models/sd35-large
     # repo id base / custom VAE -> models/<org>/<repo>
     ./.venv/bin/hf download SG161222/RealVisXL_V5.0 --local-dir models/SG161222/RealVisXL_V5.0
+    # Qwen-Image 2.1 (7B transformer + 8B text encoder + VAE, ~31 GB bf16)
+    ./.venv/bin/hf download Qwen/Qwen-Image-2.1 --local-dir models/Qwen/Qwen-Image-2.1
     # LoRA / ControlNet / preprocessors -> the same plain-dir layout
+    ./.venv/bin/hf download abenzerps/qwen-image-2.1-uncensored-lora --local-dir models/abenzerps/qwen-image-2.1-uncensored-lora
     ./.venv/bin/hf download prithivMLmods/SD3.5-Large-Photorealistic-LoRA --local-dir models/prithivMLmods/SD3.5-Large-Photorealistic-LoRA
     ./.venv/bin/hf download diffusers-internal-dev/sd35-controlnet-depth-8b --local-dir models/diffusers-internal-dev/sd35-controlnet-depth-8b
     ./.venv/bin/hf download Intel/dpt-hybrid-midas --local-dir models/Intel/dpt-hybrid-midas
@@ -356,9 +362,13 @@ Layout:
     models/yolov8n-pose.pt  openpose preprocessor
 
 Defaults per model family (from `families.*`): **SDXL** 1024×1024 / 30 steps /
-guidance 7.0, **SD3.5 (Medium & Large)** 1024×1024 / 40 steps / guidance 4.5
+guidance 7.0, **SD3.5 (Medium & Large)** 1024×1024 / 40 steps / guidance 4.5,
+**Qwen-Image 2.1** 1024×1024 / 40 steps / guidance 1.0 (no CFG by default;
+pass `guidance_scale` > 1 with a `negative_prompt` to enable classifier-free
+guidance)
 (0 = family default in the tools). Requested sizes are snapped to the nearest
-native training bucket of the active model (SDXL ~1MP; SD3.5 up to ~2MP) —
+native training bucket of the active model (SDXL ~1MP; SD3.5 up to ~2MP;
+Qwen-Image 2.1 up to ~2.1MP; sizes must stay multiples of 32) —
 off-bucket sizes (e.g. 512×512) produce tiled/duplicated patterns. On
 lower-VRAM cards weights auto-fall back to CPU
 offload; CUDA-OOM at runtime also auto-offloads and retries.
@@ -429,10 +439,12 @@ Requires the `peft` dependency (listed in `server/requirements.txt`).
 - Client-supplied `lora` ids are restricted to `supported_loras` in
   `model.json` (id → description map; `*` = any bare `org/repo` id). URLs,
   local paths and path traversal are always rejected, and weights load
-  safetensors-only. SD3.5-family kohya-style LoRAs are converted server-side.
+  safetensors-only. SD3.5-family kohya-style LoRAs are converted server-side;
+  Qwen-Image 2.1 LoRAs load through `QwenImageLoraLoaderMixin`.
 - **ControlNet ids are server-side and hidden** — clients only choose an
   abstract `control_type`; backing model and preprocessor are configured in
-  `control_types`.
+  `control_types`. ControlNet is **not supported for the `qwen-image-2.1`
+  family** (the unified pipeline does image-conditioned editing without it).
 - All weights are **plain local dirs** provisioned by `scripts/fetch-models.sh`
   — no downloads at startup or at tool-call time; a missing model raises a
   provisioning error.

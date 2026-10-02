@@ -514,8 +514,9 @@ _FAMILY_CACHE: str | None = None
 
 def _model_family() -> str:
     """Detect the pipeline family of the configured model ("sdxl", "sd35-medium",
-    "sd35-large" or "krea2"): local dirs are inspected via model_index.json
-    (and the transformer config); repo ids fall back to the id/name string."""
+    "sd35-large", "krea2" or "qwen-image-2.1"): local dirs are inspected via
+    model_index.json (and the transformer config); repo ids fall back to the
+    id/name string."""
     global _FAMILY_CACHE
     if _FAMILY_CACHE is not None:
         return _FAMILY_CACHE
@@ -530,7 +531,9 @@ def _model_family() -> str:
                 klass = (_json.load(fh).get("config", {}).get("diffusers", {}).get("_class_name") or "")
         except Exception:  # noqa: BLE001
             klass = ""
-        if "StableDiffusion3" in klass:
+        if "QwenImage21" in klass:
+            fam = "qwen-image-2.1"
+        elif "StableDiffusion3" in klass:
             fam = _sd35_variant_from_id() or _sd35_variant_from_index()
         elif "Krea2" in klass:
             fam = "krea2"
@@ -716,17 +719,24 @@ def _build_txt(slot):
     if DEVICE != "cpu" and not torch.cuda.is_available():
         _log(f"CUDA not available, falling back to CPU (device={device})")
 
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    model_kwargs: dict = {"dtype": dtype}
-
     family = _model_family()
-    if not (family == "sdxl" or family.startswith("sd35")):
+    if not (family == "sdxl" or family.startswith("sd35") or family == "qwen-image-2.1"):
         raise ValueError(
             f"model={_model_id()!r} is not a supported model family "
-            f"(detected '{family}'; supported: sdxl, sd35-medium, sd35-large)"
+            f"(detected '{family}'; supported: sdxl, sd35-medium, sd35-large, qwen-image-2.1)"
         )
 
-    if family.startswith("sd35"):
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    # Qwen-Image-2.1 is a bf16 checkpoint (no fp16 weights).
+    if family == "qwen-image-2.1" and dtype != torch.float32:
+        dtype = torch.bfloat16
+    model_kwargs: dict = {"dtype": dtype}
+
+    if family == "qwen-image-2.1":
+        from diffusers import QwenImage21Pipeline
+
+        pipe_cls = QwenImage21Pipeline
+    elif family.startswith("sd35"):
         from diffusers import StableDiffusion3Pipeline
 
         pipe_cls = StableDiffusion3Pipeline
@@ -910,20 +920,35 @@ def _generate(
         seed = random.randint(0, 2**31 - 1)
     generator = torch.Generator(device="cpu").manual_seed(seed)
 
-    common = dict(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        width=width,
-        height=height,
-        num_inference_steps=steps,
-        guidance_scale=guidance,
-        generator=generator,
-    )
-
     def _cb(_pipe, step: int, _ts, _kwargs):
         if on_step:
             on_step(step)
         return _kwargs
+
+    if _model_family() == "qwen-image-2.1":
+        # Qwen-Image-2.1 uses true_cfg_scale for classifier-free guidance
+        # (default 1.0 = no guidance); the negative prompt only applies when
+        # true_cfg_scale > 1, so an empty default is passed as None to avoid
+        # the pipeline's "CFG not enabled" warning on ordinary generations.
+        common = dict(
+            prompt=prompt,
+            negative_prompt=negative_prompt or None,
+            true_cfg_scale=guidance,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            generator=generator,
+        )
+    else:
+        common = dict(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            guidance_scale=guidance,
+            generator=generator,
+        )
 
     images = _oom_retry(
         pipe,
@@ -941,6 +966,14 @@ def _generate(
 def _build_i2i(slot):
     """Build the slot's img2img pipeline from its own txt2img pipeline
     (shares this slot's weights -> no extra VRAM for the base model)."""
+    # Qwen-Image-2.1 has a single unified QwenImage21Pipeline: image
+    # conditioning and editing run on the same pipeline via its `image`
+    # argument, so there is no separate img2img class to build. Share the
+    # txt pipeline (own device/offload state).
+    if _model_family() == "qwen-image-2.1":
+        slot.i2i = slot.txt
+        _log("img2img pipeline ready (slot-local, shared Qwen-Image-2.1 pipeline)")
+        return slot.i2i
     from diffusers import AutoPipelineForImage2Image
 
     slot.i2i = AutoPipelineForImage2Image.from_pipe(slot.txt)
@@ -1420,7 +1453,7 @@ def _apply_loras(pipe, spec: str) -> None:
     if not entries:
         return
     family = _model_family()
-    if not (family == "sdxl" or family.startswith("sd35")):
+    if not (family == "sdxl" or family.startswith("sd35") or family == "qwen-image-2.1"):
         raise ValueError("LoRA adapters are not supported for this model family")
     with _LORA_LOCK:
         names, weights = [], []
@@ -1602,6 +1635,8 @@ def _build_cn(slot, model_id: str):
     family = _model_family()
     if not (family == "sdxl" or family.startswith("sd35")):
         raise ValueError(f"ControlNet editing is not supported for the {family} model family")
+    if family == "qwen-image-2.1":
+        raise ValueError("ControlNet editing is not supported for the qwen-image-2.1 family")
     import torch
     from diffusers import ControlNetModel
 
@@ -1722,6 +1757,37 @@ def _image2image(
         if on_step:
             on_step(min(step, eff_steps))
         return _kwargs
+
+    if _model_family() == "qwen-image-2.1":
+        # Qwen-Image-2.1 edits on the same unified pipeline: pass the source
+        # image as `image` (list), use true_cfg_scale, and let the pipeline
+        # derive the output size from the image aspect (width/height 0 =
+        # source-derived). It has no `strength` / ControlNet support.
+        if control_type:
+            raise ValueError(
+                "ControlNet editing is not supported for the qwen-image-2.1 family"
+            )
+        pipe = _ensure_i2i(slot)
+        _apply_loras(pipe, lora_spec)
+        # `strength` does not apply: the full step count runs on the unified
+        # pipeline. Progress reporting matches the real step count.
+        eff_steps = steps
+        kw = dict(
+            prompt=prompt,
+            image=[source],
+            negative_prompt=negative_prompt or None,
+            true_cfg_scale=guidance,
+            num_inference_steps=steps,
+            generator=generator,
+            callback_on_step_end=_cb,
+            callback_on_step_end_tensor_inputs=[],
+        )
+        if width:
+            kw["width"] = w
+        if height:
+            kw["height"] = h
+        result = _oom_retry(pipe, **kw)
+        return result.images[0], seed, eff_steps
 
     common = dict(
         prompt=prompt,
@@ -2428,10 +2494,10 @@ def main() -> int:  # noqa: C901
     global _MAX_BODY_BYTES
     _MAX_BODY_BYTES = args.max_body_mb * 1024 * 1024
     fam = _model_family()
-    if not (fam == "sdxl" or fam.startswith("sd35")):
+    if not (fam == "sdxl" or fam.startswith("sd35") or fam == "qwen-image-2.1"):
         print(
             f"[pictura-mcp] model {_model_id()!r} is not a supported "
-            "model family (supported: sdxl, sd35-medium, sd35-large)",
+            "model family (supported: sdxl, sd35-medium, sd35-large, qwen-image-2.1)",
             file=sys.stderr,
             flush=True,
         )

@@ -6,7 +6,11 @@
 # (torch 2.7.1+cu126) instead - its `torch>=2.9,<3.0` line would upgrade
 # torch away from the working sm_70 build.
 torch>=2.9,<3.0
-diffusers>=0.40,<1.0
+# Qwen-Image 2.1 (diffusers.QwenImage21Pipeline) is not in a PyPI release yet
+# (merged to git main via huggingface/diffusers#14804 on 2026-09-20). Pin the
+# git main build so QwenImage21Pipeline is importable; switch back to a PyPI
+# release (e.g. `diffusers>=0.41,<1.0`) once Qwen-Image 2.1 ships there.
+diffusers @ git+https://github.com/huggingface/diffusers.git@main
 transformers>=5.17,<6.0
 accelerate>=1.15,<2.0
 safetensors>=0.8,<1.0

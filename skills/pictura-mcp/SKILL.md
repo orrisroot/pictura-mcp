@@ -13,7 +13,8 @@ license: MIT
 # Pictura MCP
 
 Pictura MCP is a **local, stateless** image-generation MCP server (Stable
-Diffusion — SDXL or SD3.5, active family from the local model config). Images
+Diffusion — SDXL or SD3.5 — or Qwen-Image 2.1, active family from the local
+model config). Images
 come back to you inline (stdio) or as a
 short-lived download URL (http/sse); the server never writes files, so **you
 save them yourself**.
@@ -126,10 +127,15 @@ current set.
 
 ## Model families
 
-- Supported families: **SDXL** (`sdxl`) and **SD3.5** (`sd35-medium` /
-  `sd35-large`); the active model comes from `server/model.json` (`model`).
-  txt2img, img2img, LoRA and ControlNet are all supported. Unsupported
-  families are rejected at startup.
+- Supported families: **SDXL** (`sdxl`), **SD3.5** (`sd35-medium` /
+  `sd35-large`), and **Qwen-Image 2.1** (`qwen-image-2.1`); the active model
+  comes from `server/model.json` (`model`).
+  - SDXL / SD3.5: txt2img, img2img, LoRA and ControlNet are all supported.
+  - Qwen-Image 2.1: txt2img, img2img (image-conditioned editing on the same
+    unified pipeline) and LoRA are supported; **ControlNet is not**.
+  - Qwen-Image 2.1 defaults: guidance 1.0 = no classifier-free guidance; pass
+    `guidance_scale` > 1 with a `negative_prompt` to enable CFG.
+- Unsupported families are rejected at startup.
 
 ## Notes
 

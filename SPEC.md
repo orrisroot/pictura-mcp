@@ -14,7 +14,7 @@ Local, GPU-backed image generation wrapped as an MCP server:
 
 ```
 MCP client ──────────────────▶ pictura_server.py ──────────────▶ GPU
-            (stdio|HTTP|SSE)                      (SDXL/SD3.5)
+            (stdio|HTTP|SSE)                      (SDXL/SD3.5/Qwen-Image 2.1)
 ```
 
 It is client-agnostic — any harness that speaks MCP (Claude Desktop, Cursor,
@@ -55,11 +55,11 @@ Text-to-image.
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `prompt` | string | — | required |
-| `negative_prompt` | string | `""` | |
-| `width` | int | 0 = family default | any positive value is snapped to the nearest native training bucket of the active model (SDXL ~1MP / SD3.5 up to ~2MP; min 256, multiple of 8) |
+| `negative_prompt` | string | `""` | only used when CFG is active (Qwen-Image 2.1: `guidance_scale > 1`) |
+| `width` | int | 0 = family default | any positive value is snapped to the nearest native training bucket of the active model (SDXL ~1MP / SD3.5 up to ~2MP / Qwen-Image 2.1 up to ~2.1MP, multiple of 32; min 256, multiple of 8) |
 | `height` | int | 0 = family default | any positive value is snapped to the nearest native training bucket |
-| `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40) | clamped to [10, 100] |
-| `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5) | |
+| `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40 / Qwen 40) | clamped to [10, 100] |
+| `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5 / Qwen 1.0) | mapped to `true_cfg_scale` for Qwen-Image 2.1 |
 | `seed` | int | -1 | -1 = random |
 | `lora` | string | `""` | optional LoRA adapters, `'huggingface/repo:weight,...'` |
 
@@ -70,14 +70,14 @@ Edits an existing image with a prompt (img2img).
 |---|---|---|---|
 | `prompt` | string | — | required |
 | `image` | string | — | required. Source image: an `http(s)://` URL — a server image URL (`http://<host>/images/<id>` from `generate_image` / `edit_image` / `POST /images/upload`, resolved from the in-memory cache) or an external image URL (fetched server-side, SSRF-guarded). On a local stdio run a host file path / `file://` URI is also accepted; over http/sse the server reads no host files |
-| `negative_prompt` | string | `""` | |
-| `strength` | float | 0.6 | 0..1, higher = more change |
-| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value is snapped to the nearest native training bucket of the active model (min 256, multiple of 8) |
-| `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40) | effective steps ≈ `steps × strength` |
-| `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5) | |
+| `negative_prompt` | string | `""` | only used when CFG is active (Qwen-Image 2.1: `guidance_scale > 1`) |
+| `strength` | float | 0.6 | 0..1, higher = more change (not used by Qwen-Image 2.1, which edits on the unified pipeline) |
+| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value is snapped to the nearest native training bucket of the active model (min 256, multiple of 8; Qwen-Image 2.1 keeps the source aspect and derives size from `output_resolution`) |
+| `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40 / Qwen 40) | effective steps ≈ `steps × strength` |
+| `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5 / Qwen 1.0) | mapped to `true_cfg_scale` for Qwen-Image 2.1 |
 | `seed` | int | -1 | -1 = random |
 | `lora` | string | `""` | optional LoRA adapters, `'huggingface/repo:weight,...'` |
-| `control_type` | string | `""` | optional abstract ControlNet type applied to the source (`canny`, `depth`, `openpose`); server hides the model; empty = disabled |
+| `control_type` | string | `""` | optional abstract ControlNet type applied to the source (`canny`, `depth`, `openpose`); server hides the model; empty = disabled. **Not supported for `qwen-image-2.1`** |
 | `control_scale` | float | 1.0 | ControlNet conditioning strength (~0.4–1.0) |
 
 ### `upload_image`
@@ -122,7 +122,8 @@ All model settings live in **one deployment-local file**, `server/model.json`
 `server/model.json` or point `PICTURA_MODEL_CONFIG` at a preset).
 `PICTURA_MODEL_CONFIG` overrides the path):
 - `model` — base model: local path (absolute or project-root-relative) or
-  `org/repo` id; family is auto-detected (`sdxl`, `sd35-medium`, `sd35-large`)
+  `org/repo` id; family is auto-detected (`sdxl`, `sd35-medium`, `sd35-large`,
+  `qwen-image-2.1`)
 - `vae` — optional custom VAE id (`null` = auto)
 - `families.<id>` — per-family settings: `desc`, `steps`, `guidance`,
   `width` / `height`, `auto_vae`, `buckets` (native resolutions; rotations are
@@ -142,25 +143,32 @@ model raises a provisioning error. SDXL families use the configured
 |---|---|---|---|
 | `sdxl` | 1024×1024 | 30 | 7.0 |
 | `sd35-medium` / `sd35-large` | 1024×1024 | 40 | 4.5 |
+| `qwen-image-2.1` | 1024×1024 | 40 | 1.0 (no CFG; `>1` + negative prompt enables CFG) |
 
 Requested sizes are snapped to the family's native training buckets (`buckets`
 in the config), so output always stays on the aspect/area combinations the
 model was trained on.
 
 ### Memory strategy (low VRAM)
-1. fp16 weights loaded; attention slicing + VAE slicing + VAE tiling enabled.
+1. fp16 weights loaded (bf16 for Qwen-Image 2.1); attention slicing + VAE
+   slicing + VAE tiling enabled.
 2. **Proactive CPU offload** when the model is SDXL with default res ≥ 768, or
-   whenever weights exceed ~80% of VRAM. Otherwise weights stay fully on GPU.
+   whenever weights exceed ~80% of VRAM. Qwen-Image 2.1 (~31 GB bf16) exceeds
+   80% of a 24–32 GB card, so it always runs with model CPU offload
+   (`text_encoder->transformer->vae`). Otherwise weights stay fully on GPU.
 3. Runtime CUDA-OOM → auto `enable_model_cpu_offload()` + one retry.
 4. img2img reuses the loaded components via `AutoPipelineForImage2Image.from_pipe`
-   (shared weights, no second model copy).
+   (shared weights, no second model copy). Qwen-Image 2.1 has a single unified
+   pipeline: image conditioning / editing runs on the same `QwenImage21Pipeline`
+   via its `image` argument (no separate img2img class).
 
 ### Model family & configuration (single JSON file)
 
 The active model (base model / optional VAE / supported LoRAs / ControlNet
 types) is defined in one file, `server/model.json` (`PICTURA_MODEL_CONFIG`
 points at an alternative; presets in `server/examples/`). Supported families:
-**SDXL** (`sdxl`), **SD3.5 Medium / Large** (`sd35-medium` / `sd35-large`).
+**SDXL** (`sdxl`), **SD3.5 Medium / Large** (`sd35-medium` / `sd35-large`),
+**Qwen-Image 2.1** (`qwen-image-2.1`).
 The family is detected from the model directory's `model_index.json` (and the
 transformer config for SD3.5 variants); repo ids fall back to the id string.
 Unsupported families are rejected at startup (exit 2).
@@ -415,7 +423,7 @@ server/
   pictura_server.py                # MCP image server (the implementation)
   requirements.txt               # python deps
   requirements-v100.txt          # python deps for Volta/V100 (torch 2.7.1+cu126)
-  examples/                      # model config PRESETS (model.sdxl / sd35-medium / sd35-large)
+  examples/                      # model config PRESETS (model.sdxl / sd35-medium / sd35-large / qwen-image-2.1)
 skills/
   README.md                      # Agent Skill install guide
   pictura-mcp/SKILL.md           # the Agent Skill (operating policy for agents)
@@ -425,7 +433,7 @@ skills/
 ```
 .mcp.json                        # YOUR client config - copy deploy/mcp.json.example and fill in
 deploy/pictura-mcp.env            # YOUR secrets - copy deploy/pictura-mcp.env.example, set the token
-server/model.json                 # YOUR model config - copy server/examples/model.sd35-large.json (or another preset)
+server/model.json                 # YOUR model config - copy server/examples/model.sd35-large.json (or model.qwen-image-2.1.json, another preset)
 .venv/                           # python env - create with: python3 -m venv .venv (+ pip install -r server/requirements.txt; V100: -r server/requirements-v100.txt)
 outputs/                         # created automatically later by: server/pictura_server.py --smoke
 ```
