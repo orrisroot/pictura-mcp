@@ -1,0 +1,52 @@
+{
+  "model": "models/sd35-large",
+  "vae": null,
+  "families": {
+    "sd35-large": {
+      "desc": "Stable Diffusion 3.5 Large",
+      "steps": 40,
+      "guidance": 4.5,
+      "width": 1024,
+      "height": 1024,
+      "auto_vae": null,
+      "buckets": [
+        [512, 2048], [512, 1984], [512, 1920], [512, 1856],
+        [576, 1792], [576, 1728], [576, 1664],
+        [640, 1600], [640, 1536],
+        [704, 1472], [704, 1408], [704, 1344],
+        [768, 1344], [768, 1280],
+        [832, 1216], [832, 1152],
+        [896, 1152], [896, 1088],
+        [960, 1088], [960, 1024],
+        [1024, 1024], [1024, 960],
+        [1088, 960], [1088, 896],
+        [1152, 896], [1152, 832],
+        [1216, 832], [1280, 768],
+        [1344, 768], [1344, 704],
+        [1408, 704], [1472, 704],
+        [1536, 640], [1536, 1152], [1280, 1280]
+      ]
+    }
+  },
+  "supported_loras": {
+    "nerijs/pixel-art-xl": "pixel-art style (SDXL family)",
+    "CiroN2022/toy-face": "cute toy/3D face style (SDXL family)",
+    "AdamLucek/sd3.5M-jareklfoto-LoRA-DreamBooth": "summer film-photography style (SD3.5 Medium; trigger 'A jareklfoto picture of'; non-commercial)",
+    "prithivMLmods/SD3.5-Large-Photorealistic-LoRA": "photorealistic/film look (SD3.5 Large; trigger 'photorealistic'; OpenRAIL-M)",
+    "prithivMLmods/SD3.5-Large-Anime-LoRA": "Japanese anime style (SD3.5 Large; trigger 'Anime 35'; OpenRAIL-M)"
+  },
+  "control_types": {
+    "canny": {
+      "desc": "Canny edge lines (keeps linear structure / line art)",
+      "pre": "opencv_canny",
+      "model": "diffusers-internal-dev/sd35-controlnet-canny-8b",
+      "prep_model": null
+    },
+    "depth": {
+      "desc": "Depth map (spatial layout)",
+      "pre": "dpt",
+      "model": "diffusers-internal-dev/sd35-controlnet-depth-8b",
+      "prep_model": "Intel/dpt-hybrid-midas"
+    }
+  }
+}

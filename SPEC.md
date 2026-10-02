@@ -13,9 +13,8 @@ MCP client (stdio, streamable HTTP, SSE).
 Local, GPU-backed image generation wrapped as an MCP server:
 
 ```
-any MCP client/harness --(stdio | streamable HTTP | SSE)--> pictura_server.py
-                                                        │
-                                 diffusers (Stable Diffusion XL) ──┴─▶ local GPU
+MCP client ──────────────────▶ pictura_server.py ──────────────▶ GPU
+            (stdio|HTTP|SSE)                      (SDXL/SD3.5)
 ```
 
 It is client-agnostic — any harness that speaks MCP (Claude Desktop, Cursor,
@@ -57,10 +56,10 @@ Text-to-image.
 |---|---|---|---|
 | `prompt` | string | — | required |
 | `negative_prompt` | string | `""` | |
-| `width` | int | model-aware (1024 for SDXL, 512 else) | any positive value is snapped to the nearest SDXL ~1MP training bucket (min 256, multiple of 8) |
-| `height` | int | model-aware | any positive value is snapped to the nearest SDXL ~1MP training bucket |
-| `num_inference_steps` | int | 30 | clamped to [10, 100] |
-| `guidance_scale` | float | 7.5 | |
+| `width` | int | 0 = family default | any positive value is snapped to the nearest native training bucket of the active model (SDXL ~1MP / SD3.5 up to ~2MP; min 256, multiple of 8) |
+| `height` | int | 0 = family default | any positive value is snapped to the nearest native training bucket |
+| `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40) | clamped to [10, 100] |
+| `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5) | |
 | `seed` | int | -1 | -1 = random |
 | `lora` | string | `""` | optional LoRA adapters, `'huggingface/repo:weight,...'` |
 
@@ -73,9 +72,9 @@ Edits an existing image with a prompt (img2img).
 | `image` | string | — | required. Source image: an `http(s)://` URL — a server image URL (`http://<host>/images/<id>` from `generate_image` / `edit_image` / `POST /images/upload`, resolved from the in-memory cache) or an external image URL (fetched server-side, SSRF-guarded). On a local stdio run a host file path / `file://` URI is also accepted; over http/sse the server reads no host files |
 | `negative_prompt` | string | `""` | |
 | `strength` | float | 0.6 | 0..1, higher = more change |
-| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value is snapped to the nearest SDXL ~1MP training bucket (min 256, multiple of 8) |
-| `num_inference_steps` | int | 25 | effective steps ≈ `steps × strength` |
-| `guidance_scale` | float | 7.5 | |
+| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value is snapped to the nearest native training bucket of the active model (min 256, multiple of 8) |
+| `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40) | effective steps ≈ `steps × strength` |
+| `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5) | |
 | `seed` | int | -1 | -1 = random |
 | `lora` | string | `""` | optional LoRA adapters, `'huggingface/repo:weight,...'` |
 | `control_type` | string | `""` | optional abstract ControlNet type applied to the source (`canny`, `depth`, `openpose`); server hides the model; empty = disabled |
@@ -96,7 +95,7 @@ after a successful upload, and released for retry when the upload fails. The
 `PICTURA_API_KEY` header is also accepted (direct/LAN clients).
 
 ### `list_loras`
-Returns the allowlisted LoRA ids valid for the `lora` parameter.
+Returns the supported LoRA ids valid for the `lora` parameter.
 
 ### `list_control_types`
 Returns the abstract ControlNet types valid for `control_type`, with short
@@ -117,20 +116,36 @@ note containing a short-lived download URL (`http://<base>/images/<id>`, TTL
 
 ## 3. Models & pipeline
 
-### Default model
-- **`stabilityai/stable-diffusion-xl-base-1.0`** (fp16) with the fp16-safe VAE
-  `madebyollin/sdxl-vae-fp16-fix` automatically swapped in (avoids black-image /
-  NaN artifacts; no fp32-upcast / vae-tiling conflict).
-- Nothing is stored in the repo; weights are cached by Hugging Face in the
-  standard hub cache on load.
+### Model configuration (single file)
+All model settings live in **one deployment-local file**, `server/model.json`
+(gitignored; presets in `server/examples/*.json` — copy one to
+`server/model.json` or point `PICTURA_MODEL_CONFIG` at a preset).
+`PICTURA_MODEL_CONFIG` overrides the path):
+- `model` — base model: local path (absolute or project-root-relative) or
+  `org/repo` id; family is auto-detected (`sdxl`, `sd35-medium`, `sd35-large`)
+- `vae` — optional custom VAE id (`null` = auto)
+- `families.<id>` — per-family settings: `desc`, `steps`, `guidance`,
+  `width` / `height`, `auto_vae`, `buckets` (native resolutions; rotations are
+  added automatically)
+- `supported_loras` — id → description map (client-usable LoRAs)
+- `control_types` — `pre` / `model` / `prep_model` per abstract type
+  (`canny` / `depth` / `openpose`; ids hidden from clients)
+
+Weights are **plain local directories** under `PICTURA_MODELS_DIR` (default
+`<project>/models`; `models/<org>/<repo>` for repo ids), provisioned by
+`scripts/fetch-models.sh` before start. The server never downloads: a missing
+model raises a provisioning error. SDXL families use the configured
+`auto_vae` (fp16-safe VAE) automatically.
 
 ### Model-aware defaults
-| Model | Default W×H | Default steps |
-|---|---|---|
-| SDXL (required) | 1024×1024 | 30 |
+| Family | Default W×H | Default steps | Guidance |
+|---|---|---|---|
+| `sdxl` | 1024×1024 | 30 | 7.0 |
+| `sd35-medium` / `sd35-large` | 1024×1024 | 40 | 4.5 |
 
-Requested sizes are snapped to the SDXL training buckets (~1MP), so output
-always stays on the aspect/area combinations the model was trained on.
+Requested sizes are snapped to the family's native training buckets (`buckets`
+in the config), so output always stays on the aspect/area combinations the
+model was trained on.
 
 ### Memory strategy (low VRAM)
 1. fp16 weights loaded; attention slicing + VAE slicing + VAE tiling enabled.
@@ -140,27 +155,33 @@ always stays on the aspect/area combinations the model was trained on.
 4. img2img reuses the loaded components via `AutoPipelineForImage2Image.from_pipe`
    (shared weights, no second model copy).
 
-### Model family (SDXL only)
+### Model family & configuration (single JSON file)
 
-This server supports the **SDXL family only**. `PICTURA_MODEL` must reference an
-SDXL checkpoint (default `stabilityai/stable-diffusion-xl-base-1.0`; the id
-must contain `xl`); finetunes and SDXL-derivative checkpoints work by simply
-swapping the model id. Non-SDXL values are rejected at startup (exit 2).
+The active model (base model / optional VAE / supported LoRAs / ControlNet
+types) is defined in one file, `server/model.json` (`PICTURA_MODEL_CONFIG`
+points at an alternative; presets in `server/examples/`). Supported families:
+**SDXL** (`sdxl`), **SD3.5 Medium / Large** (`sd35-medium` / `sd35-large`).
+The family is detected from the model directory's `model_index.json` (and the
+transformer config for SD3.5 variants); repo ids fall back to the id string.
+Unsupported families are rejected at startup (exit 2).
 
-When swapping in an SDXL finetune, review the LoRA / ControlNet allowlists:
-LoRA ids are default-allowlisted for the base checkpoints, so other adapters
-require `PICTURA_LORA_ALLOWLIST` (or `*`), and the ControlNet models must be
-SDXL-compatible (the internal allowlist handles that).
+LoRA ids are restricted to `supported_loras` in the config (`["*"]` = any id);
+ControlNet is exposed as abstract `control_type`s (`canny` / `depth` /
+`openpose`, in-memory preprocessed server-side); the backing model and
+preprocessor weights are configured server-side in `control_types` and are
+**not exposed to clients**.
 
-### LoRA / ControlNet allowlist & downloads
-- **Default allowlist** of generic SDXL LoRAs (`nerijs/pixel-art-xl`,
-  `CiroN2022/toy-face`) via `PICTURA_LORA_ALLOWLIST`. ControlNet is exposed as
-  abstract `control_type`s (`canny` / `depth` / `openpose`, in-memory
-  preprocessed server-side); the backing model is resolved from an
-  internal `PICTURA_CONTROLNET_ALLOWLIST` and is **not exposed to clients**.
-- URLs and local paths are always rejected; weights load safetensors-only.
-- Allowlisted models are **pre-downloaded at service startup** (skip with
-  `PICTURA_SKIP_PREFETCH=1`); download location via `PICTURA_MODEL_CACHE_DIR`.
+### Downloads (manual, before first start)
+- URLs and local paths are always rejected for client-supplied ids; weights
+  load safetensors-only.
+- Pre-download everything before starting the service with
+  `sudo scripts/fetch-models.sh` (reads `server/model.json` — copy a preset
+  from `server/examples/` first if it is missing; everything is
+  written as **plain local dirs**: repo ids → `models/<org>/<repo>/`).
+  See the README for one-by-one `hf download --local-dir` examples.
+- The server never contacts Hugging Face (no startup prefetch, no lazy
+  downloads); a missing model surfaces as a clear provisioning error pointing
+  at `scripts/fetch-models.sh`.
 
 ---
 
@@ -249,14 +270,10 @@ python server/pictura_server.py [options]
 
 | Var | Default | Meaning |
 |---|---|---|
-| `PICTURA_MODEL` | `stabilityai/stable-diffusion-xl-base-1.0` | HF model id |
-| `PICTURA_VAE` | unset | optional VAE override |
+| `PICTURA_MODEL_CONFIG` | deployment-local `server/model.json` | path to the model config (model / vae / supported_loras / control_types) |
 | `PICTURA_DEVICE` | `cuda` | `cuda` or `cpu` (auto-fallback to cpu) |
 | `PICTURA_CUDA_DEVICE` | unset | restrict CUDA GPU(s) (`0`, `0,1`) → `CUDA_VISIBLE_DEVICES` |
-| `PICTURA_MODEL_CACHE_DIR` | HF cache | model download/cache directory |
-| `PICTURA_LORA_ALLOWLIST` | built-in default | override LoRA allowlist (comma-separated; `*` = any `org/repo`) |
-| `PICTURA_CONTROLNET_ALLOWLIST` | built-in default | override ControlNet allowlist (same semantics) |
-| `PICTURA_SKIP_PREFETCH` | unset | `1` = skip pre-downloading allowlisted models at startup |
+| `PICTURA_MODELS_DIR` | `<project>/models` | root of the standard local model layout (plain dirs: `models/<org>/<repo>/`, `models/yolov8n-pose.pt`) |
 | `PICTURA_MAX_CONCURRENT` | `auto` | render slot pool size: integer pins it, `1` = strictly serial, `auto` = sized from free VRAM |
 | `PICTURA_PUBLIC_URL` | unset | required for non-loopback http/sse binds; externally visible base (scheme + host + path prefix); loopback fallback: request `Host` |
 | `PICTURA_IMAGE_CACHE_TTL` | `600` | seconds an image download URL stays valid |
@@ -279,9 +296,9 @@ above the ~1.6 MB outputs and typical camera JPEGs. Raise
 `PICTURA_IMAGE_MAX_BODY_MB` / `--max-body-mb` only if you really pass very large
 sources. Stdio (local) has no body cap.
 
-Generation and edit sizes stay at the native-bucket level (~1MP), so compute
-and memory do not depend on the requested aspect ratio (e.g. 1536×640 costs
-about the same as 1024×1024).
+Generation and edit sizes stay at the native-bucket level of the active model
+family, so compute and memory do not depend on the requested aspect ratio
+(e.g. 1536×640 costs about the same as 1024×1024).
 
 ---
 
@@ -296,7 +313,7 @@ bound to any client. Every client stores server definitions in the same shape:
     "pictura": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
-      "env": { "PICTURA_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" }
+      "env": { "PICTURA_MODEL_CONFIG": "<PROJECT_ROOT>/server/model.json" }
     }
   }
 }
@@ -322,11 +339,11 @@ bound to any client. Every client stores server definitions in the same shape:
 ```
 
 **Client timeout** (`requestTimeoutMs`, supported by pi's MCP adapter and most
-harnesses): set it generously — SDXL at default 1024²·30 steps takes tens of
-seconds, and under parallel load a job may additionally wait for a free slot
-or a lazily built one (a cold parallel burst can run minutes). The MCP SDK
+harnesses): set it generously — a generation at the family default (1024²,
+30-40 steps) takes tens of seconds to minutes, and under parallel load a job
+may additionally wait for a free slot or a lazily built one. The MCP SDK
 default (60 s) times out on ordinary generations; the shipped templates use
-`600000` (10 min — only a first-run cold cache download could exceed that).
+`600000` (10 min).
 
 Any other harness simply points its own client config at the same server — the
 block above is identical regardless of harness.
@@ -348,9 +365,10 @@ client config (e.g. `.mcp.json` — copy of `deploy/mcp.json.example`, real path
 - **systemd (recommended for long-running / remote)**: can run under a
   **dedicated service account**. `deploy/install-systemd.sh <PROJECT_ROOT>
   [SERVICE_USER] [PORT]` (root) creates the unprivileged account, prepares the
-  model cache/log dirs, renders `deploy/pictura-mcp.service` (system unit with
+  models/log dirs, renders `deploy/pictura-mcp.service` (system unit with
   `User=`/`Group=` + hardening) and enables it. The env file
-  (`deploy/pictura-mcp.env`, gitignored) holds the token/model/cache/log settings.
+  (`deploy/pictura-mcp.env`, gitignored) holds the API key / model / serving /
+  log settings.
 - **One process at a time**: keeping several servers alive exhausts VRAM and
   causes CUDA OOM. Use systemd instead of ad-hoc background processes.
 

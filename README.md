@@ -4,13 +4,12 @@ A **local, GPU-backed image generation MCP server** (codename `pictura-mcp`) exp
 MCP client** — Claude Desktop, Cursor, VS Code, Windsurf, Claude Code, etc.
 
 ```
-any MCP client ──(stdio | streamable HTTP | SSE)──▶ pictura_server.py (Python)
-                                                          │
-                                   diffusers (SDXL) ───────┴─▶ local GPU
+MCP client ──────────────────▶ pictura_server.py ──────────────▶ GPU
+            (stdio|HTTP|SSE)                      (SDXL/SD3.5)
 ```
 
 - **Server**: `server/pictura_server.py` — a standard MCP server (stdio / HTTP /
-  SSE) running Stable Diffusion via Hugging Face `diffusers`.
+  SSE) running Stable Diffusion (SDXL / SD3.5) via Hugging Face `diffusers`.
 - **Client**: whatever MCP client you already use. Examples for several clients
   are in § [Client configuration](#client-configuration).
 
@@ -18,10 +17,10 @@ any MCP client ──(stdio | streamable HTTP | SSE)──▶ pictura_server.py 
 
 | Tool | Description |
 |---|---|
-| `generate_image` | text → image (SDXL default) |
+| `generate_image` | text → image (model-family defaults) |
 | `edit_image` | image → image (img2img / edit from a prompt) |
 | `upload_image` | local file → upload reservation (one-time token + POST URL; http/sse; stdio: pass the path to `edit_image`) |
-| `list_loras` | allowlisted LoRA ids (for `lora`) |
+| `list_loras` | supported LoRA ids with descriptions (for `lora`) |
 | `list_control_types` | abstract ControlNet types (for `control_type`) |
 | `server_status` | model + image-size policy (stdio adds device / VRAM etc.) |
 
@@ -57,7 +56,7 @@ LoRA/adapter state, scheduler and offload hooks), so jobs never corrupt each
 other. The pool size is sized automatically from measured free VRAM once the
 model is loaded (per extra slot costs a full set of weights plus one job's
 activation footprint, with a safety margin) — e.g. 3 slots on a 32 GB V100
-with SDXL fp16, and 1 (strictly serial) on smaller cards. Override it with
+with SDXL fp16 / SD3.5, and 1 (strictly serial) on smaller cards. Override it with
 `PICTURA_MAX_CONCURRENT` (an integer pins the pool; `auto` = VRAM-based). Note
 that extra slots are built lazily: the first burst of parallel jobs may pay
 one model-load per extra slot.
@@ -71,11 +70,14 @@ one model-load per extra slot.
 python3 -m venv .venv
 ./.venv/bin/pip install -r server/requirements.txt
 
-# 2) Smoke test (downloads the model, ~5GB, on first run)
+# 2) Provision the models (deployment step; see "Model configuration")
+sudo scripts/fetch-models.sh
+
+# 3) Smoke test
 ./.venv/bin/python server/pictura_server.py --smoke
 # -> OK if outputs/smoke_test.png is created
 
-# 3) Connect from your MCP client (see below)
+# 4) Connect from your MCP client (see below)
 ```
 
 ### CUDA driver version
@@ -99,7 +101,8 @@ fails with `CUDA error: no kernel image is available`. Use
 > `deploy/pictura-mcp.service`). Local files that are **gitignored** and created
 > per machine: your real client config (e.g. `.mcp.json` — copy from
 > `deploy/mcp.json.example`, replace `<PROJECT_ROOT>`), `deploy/pictura-mcp.env`
-> (secrets — never commit), plus `.venv/` and `outputs/`.
+> (secrets — never commit), the active model config `server/model.json` (copy a
+> preset from `server/examples/`), plus `.venv/` and `outputs/`.
 
 ## Client configuration
 
@@ -112,7 +115,7 @@ Every MCP client stores server definitions in the same shape
     "pictura": {
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
-      "env": { "PICTURA_MODEL": "stabilityai/stable-diffusion-xl-base-1.0" },
+      "env": { "PICTURA_MODEL_CONFIG": "<PROJECT_ROOT>/server/model.json" },
       "requestTimeoutMs": 600000
     }
   }
@@ -120,12 +123,11 @@ Every MCP client stores server definitions in the same shape
 ```
 
 `requestTimeoutMs` (client-side, supported by pi's MCP adapter and most
-harnesses) must allow for GPU rendering time: SDXL at the default 1024²·30
-steps takes tens of seconds, and under parallel load a job may additionally
-wait for a free slot or a lazily built one — a cold burst of parallel calls
-can run minutes. The MCP SDK default (60 s) therefore times out on ordinary
-generations; the shipped templates use `600000` (10 min — only a first-run
-cold cache download could exceed that).
+harnesses) must allow for GPU rendering time: a generation at the family
+default (1024², 30-40 steps) takes tens of seconds to minutes, and under
+parallel load a job may additionally wait for a free slot or a lazily built
+one. The MCP SDK default (60 s) therefore times out on ordinary generations;
+the shipped templates use `600000` (10 min).
 
 Where that block goes depends on the client:
 
@@ -214,8 +216,8 @@ Remote client config (`deploy/mcp.remote.json.example`):
 
 Prerequisite: §Setup step 1 above — the `.venv`+dependencies must exist at
 `<PROJECT_ROOT>/.venv` (the service runs that interpreter). The manual smoke
-test is optional here; the systemd service does its own model download +
-prefetch on first start.
+test is optional here; the service never downloads — provision the models
+first (sudo scripts/fetch-models.sh) before starting it.
 
 There are two ways to run it as a service.
 
@@ -230,12 +232,12 @@ sudo deploy/install-systemd.sh /absolute/path/to/this/repo pictura-mcp 8000
 The installer prints the next steps; the essentials are already prepared:
 
 - `deploy/pictura-mcp.env` is created from the template with an
-  **auto-randomized `PICTURA_API_KEY`**, and `PICTURA_MODEL_CACHE_DIR` /
-  `PICTURA_HOST=0.0.0.0` / `PICTURA_PORT` / `PICTURA_PUBLIC_URL` (this host's
-  IP:port — edit it to the public URL behind a reverse proxy) are
-  **pre-seeded** — edit only what needs changing
-  (`sudoedit deploy/pictura-mcp.env`; e.g. `PICTURA_MODEL`,
-  `PICTURA_CUDA_DEVICE`, `PICTURA_LOG_FILE`)
+  **auto-randomized `PICTURA_API_KEY`**, and `PICTURA_HOST=0.0.0.0` /
+  `PICTURA_PORT` / `PICTURA_PUBLIC_URL` (this host's IP:port — edit it to the
+  public URL behind a reverse proxy) are **pre-seeded** — edit only what needs
+  changing (`sudoedit deploy/pictura-mcp.env`; e.g. `PICTURA_MODEL_CONFIG`,
+  `PICTURA_CUDA_DEVICE`, `PICTURA_LOG_FILE`). Provision the models first
+  (`sudo scripts/fetch-models.sh`).
 - start and verify:
 
 ```bash
@@ -254,14 +256,13 @@ sudo systemctl status pictura-mcp
 
 This runs under the unprivileged `pictura-mcp` system account with hardening
 (`NoNewPrivileges`, `ProtectSystem`, `PrivateTmp`, …). `ProtectSystem=strict`
-makes the FS read-only, so the installer whitelists the model cache dir and log
+makes the FS read-only, so the installer whitelists the models dir and log
 file in `ReadWritePaths` (derived from `deploy/pictura-mcp.env`; log file is
 0640, owner = service account, group = service account). The installer also
-activates commented-out defaults in the env file (`PICTURA_MODEL_CACHE_DIR`,
-`PICTURA_HOST`, `PICTURA_PORT`) — the HF default cache in the service user's home
-directory stays read-only under `ProtectSystem=strict`, so a cache dir must
-always be set or model prefetch keeps re-downloading. If you later change
-`PICTURA_MODEL_CACHE_DIR` / `PICTURA_LOG_FILE`, re-run the installer (it re-renders
+activates commented-out defaults in the env file (`PICTURA_MODELS_DIR`,
+`PICTURA_HOST`, `PICTURA_PORT`); weights are provisioned ahead of time by
+`scripts/fetch-models.sh` — the server never downloads. If you later change
+`PICTURA_MODELS_DIR` / `PICTURA_LOG_FILE`, re-run the installer (it re-renders
 the unit and restarts the service). Non-root operators
 read the log by joining the group once: `sudo usermod -aG pictura-mcp <username>`
 (then log out/in). If the service crashes at startup, remove
@@ -295,24 +296,59 @@ systemctl --user status pictura-mcp
 
 Log rotation: `deploy/logrotate.example` (copytruncate, or SIGHUP postrotate).
 
-> Verified end-to-end: `tools/list` returns all five tools (`generate_image`,
-> `edit_image`, `list_loras`, `list_control_types`, `server_status`); missing/
-> wrong tokens get 401; clients connect over stdio and over HTTP.
+> Verified end-to-end: `tools/list` returns all six tools (`generate_image`,
+> `edit_image`, `list_loras`, `list_control_types`, `server_status`,
+> `upload_image`); missing/wrong tokens get 401; clients connect over stdio
+> and over HTTP.
 
-## Model (env `PICTURA_MODEL`)
+## Model configuration
 
-SDXL family only:`stabilityai/stable-diffusion-xl-base-1.0` (default) or any
-other SDXL checkpoint (finetunes and derivatives included - just swap the
-`PICTURA_MODEL` id; the id must contain `xl`). The server refuses to start
-(`exit 2`) when `PICTURA_MODEL` is not an SDXL-family checkpoint.
+All model settings live in **one file**: `server/model.json` — the base model
+(`model`; local path, relative to the project root, or `org/repo`), an
+optional custom `vae`, **per-family settings** (`families`, keyed by the
+internal id `sdxl` / `sd35-medium` / `sd35-large`: `desc`, `steps`,
+`guidance`, `width`/`height`, `buckets`, `auto_vae`), the **supported LoRA
+ids** (`supported_loras`: id → description map) and the **ControlNet types**
+(`control_types`: `pre`/`model`/`prep_model` per type). No other model env
+vars are read. `server/model.json` is **deployment-local and gitignored** like
+`deploy/pictura-mcp.env`: copy a preset from `server/examples/`
+(`model.sdxl.json` / `model.sd35-medium.json` / `model.sd35-large.json`) to
+`server/model.json`, or point `PICTURA_MODEL_CONFIG` at a preset directly. The
+server refuses to start when the configured model is not a supported family
+(exit 2).
 
-Set `PICTURA_MODEL` in your client's server `env` (or the systemd env file), then
-restart/reconnect the client. Defaults: **1024×1024 / 30 steps**. Requested
-sizes are snapped to the nearest SDXL training bucket (~1MP; e.g. 1024×1024,
-1152×896, 1344×768 and rotations) — SDXL was trained on these sizes, so
+**Model provisioning (deployment step):** the service never contacts Hugging
+Face - every weight is a **plain local directory** under `PICTURA_MODELS_DIR`
+(default `<project>/models`), prepared before start:
+
+    sudo scripts/fetch-models.sh            # base model (repo id) + VAE + LoRA + ControlNet + preprocessors
+
+Manually, one by one (`hf` ships in the project venv):
+
+    # base model as a local dir (config "model" points at it)
+    ./.venv/bin/hf download stabilityai/stable-diffusion-3.5-large --local-dir models/sd35-large
+    # repo id base / custom VAE -> models/<org>/<repo>
+    ./.venv/bin/hf download SG161222/RealVisXL_V5.0 --local-dir models/SG161222/RealVisXL_V5.0
+    # LoRA / ControlNet / preprocessors -> the same plain-dir layout
+    ./.venv/bin/hf download prithivMLmods/SD3.5-Large-Photorealistic-LoRA --local-dir models/prithivMLmods/SD3.5-Large-Photorealistic-LoRA
+    ./.venv/bin/hf download diffusers-internal-dev/sd35-controlnet-depth-8b --local-dir models/diffusers-internal-dev/sd35-controlnet-depth-8b
+    ./.venv/bin/hf download Intel/dpt-hybrid-midas --local-dir models/Intel/dpt-hybrid-midas
+    # openpose preprocessor (not an HF repo):
+    curl -fsSL https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-pose.pt -o models/yolov8n-pose.pt
+
+Layout:
+
+    models/<name>/          base model directories (config "model" points here)
+    models/<org>/<repo>/    LoRA / ControlNet / preprocessor / repo-id base models (plain dirs)
+    models/yolov8n-pose.pt  openpose preprocessor
+
+Defaults per model family (from `families.*`): **SDXL** 1024×1024 / 30 steps /
+guidance 7.0, **SD3.5 (Medium & Large)** 1024×1024 / 40 steps / guidance 4.5
+(0 = family default in the tools). Requested sizes are snapped to the nearest
+native training bucket of the active model (SDXL ~1MP; SD3.5 up to ~2MP) —
 off-bucket sizes (e.g. 512×512) produce tiled/duplicated patterns. On
-lower-VRAM cards the SDXL weights auto-fall back to CPU offload; CUDA-OOM at
-runtime also auto-offloads and retries.
+lower-VRAM cards weights auto-fall back to CPU
+offload; CUDA-OOM at runtime also auto-offloads and retries.
 
 ## Image editing (img2img)
 
@@ -330,8 +366,8 @@ runtime also auto-offloads and retries.
   **Uploading source images** above) to get a server image URL.
 - **`strength`** (0..1, default 0.6): higher = larger change
 - **`width`/`height`** (0 = keep source size; any value is snapped to the
-  nearest SDXL ~1MP training bucket — including 0, so the output aspect can
-  differ slightly from a non-bucket source)
+  nearest native training bucket of the active model — including 0, so the
+  output aspect can differ slightly from a non-bucket source)
 
 Reuses loaded weights via `AutoPipelineForImage2Image.from_pipe` (no second
 model copy). `--smoke` also exercises the img2img path.
@@ -356,18 +392,18 @@ model copy). `--smoke` also exercises the img2img path.
 ## LoRA & ControlNet
 
 **LoRA** (both `generate_image` and `edit_image`): pass `lora` as comma-separated
-`huggingface/repo:weight` entries (weight defaults to 1.0). Adapters download
-from the HF cache on first use. Example:
+`huggingface/repo:weight` entries (weight defaults to 1.0). `list_loras`
+returns the allowed ids **with what each does** (style / trigger word /
+target family). Example:
 
 ```text
-lora = "nerijs/pixel-art-xl:0.8,CiroN2022/toy-face:0.6"
+lora = "prithivMLmods/SD3.5-Large-Photorealistic-LoRA:0.8"
 ```
 
 **ControlNet** (`edit_image` only): pass `control_type` — an abstract type
-applied to the source image (`canny`, `depth`, `openpose`). The server runs the
+applied to the source image (see `list_control_types`). The server runs the
 preprocessor in-memory and picks/hides the backing model; `control_scale`
-(0.4–1.0) tunes the strength. Call `list_control_types` for the valid types.
-Example:
+(0.4–1.0) tunes the strength. Example:
 
 ```text
 control_type = "canny"   # auto-extract edges from the source, then ControlNet
@@ -376,18 +412,17 @@ control_scale = 0.9
 
 Requires the `peft` dependency (listed in `server/requirements.txt`).
 
-**Allowlist & downloads**
-- Client-supplied `lora` ids are restricted to a **built-in default allowlist**,
-  extendable via `PICTURA_LORA_ALLOWLIST` (comma-separated overrides;
-  `*` = allow any bare `org/repo` id). URLs, local paths and path traversal are
-  always rejected, and weights load safetensors-only.
-- **ControlNet ids are server-side and hidden** — clients only choose an abstract
-  `control_type`; the backing model is resolved from an internal allowlist
-  (`PICTURA_CONTROLNET_ALLOWLIST`).
-- Allowlisted models are **pre-downloaded at service startup** into the model
-  cache, so tool calls don't pay the download cost. Set `PICTURA_SKIP_PREFETCH=1`
-  to disable.
-- Download location: `PICTURA_MODEL_CACHE_DIR` (default: the Hugging Face cache).
+**Supported LoRAs & provisioning**
+- Client-supplied `lora` ids are restricted to `supported_loras` in
+  `model.json` (id → description map; `*` = any bare `org/repo` id). URLs,
+  local paths and path traversal are always rejected, and weights load
+  safetensors-only. SD3.5-family kohya-style LoRAs are converted server-side.
+- **ControlNet ids are server-side and hidden** — clients only choose an
+  abstract `control_type`; backing model and preprocessor are configured in
+  `control_types`.
+- All weights are **plain local dirs** provisioned by `scripts/fetch-models.sh`
+  — no downloads at startup or at tool-call time; a missing model raises a
+  provisioning error.
 
 ## Development checks
 

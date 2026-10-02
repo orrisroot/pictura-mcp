@@ -11,7 +11,7 @@ skills/
 ```
 
 It is optional — the server's tools are self-describing — but it encodes the
-operating policy (save returned images yourself, verify allowlisted ids, family
+operating policy (save returned images yourself, verify supported LoRA ids, family
 limits, prompting conventions, privacy) so any agent produces consistent
 results.
 

@@ -4,9 +4,13 @@
 deploy/pictura-mcp.env
 deploy/pictura-mcp.env.new
 
+# Active model config is deployment-local (weights/LoRA/CN paths):
+# copy a preset from server/examples/*.json to server/model.json.
+server/model.json
+
 # Python venv / deps / generated images
 .venv/
-.model-cache/
+/models/
 outputs/
 **/node_modules/
 __pycache__/

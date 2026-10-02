@@ -53,7 +53,7 @@ image is available (inline / at the URL) but not yet stored.
 ## Verify before you use
 
 When unsure which LoRA/ControlNet values are valid, **call the discovery tools**
-first (`list_loras`, `list_control_types`) — only allowlisted ids are accepted,
+first (`list_loras`, `list_control_types`) — only supported ids are accepted,
 and arbitrary URLs or file paths are rejected.
 
 ## generate_image
@@ -62,9 +62,9 @@ and arbitrary URLs or file paths are rejected.
 generate_image(
   prompt,                       # required; English works best
   negative_prompt = "",         # "blurry, low quality" etc.
-  width = 1024, height = 1024,  # SDXL default; snapped to an SDXL ~1MP bucket
-  num_inference_steps = 30,     # clamps to [10,100]
-  guidance_scale = 7.5,
+  width = 0, height = 0,        # 0 = model-family default; snapped to a native bucket
+  num_inference_steps = 0,      # 0 = model-family default (SDXL 30 / SD3.5 40)
+  guidance_scale = 0,           # 0 = model-family default (SDXL 7.0 / SD3.5 4.5)
   seed = -1,                    # -1 = random
   lora = ""                     # "huggingface/repo:weight" (repeatable with commas)
 )
@@ -78,9 +78,9 @@ edit_image(
   image,                        # required: http(s) URL, or file path (stdio/local)
   negative_prompt = "",
   strength = 0.6,               # 0..1; higher = bigger change
-  width = 0, height = 0,        # 0 = keep source size; else snapped to an SDXL ~1MP bucket
-  num_inference_steps = 25,
-  guidance_scale = 7.5,
+  width = 0, height = 0,        # 0 = keep source size; else snapped to a native bucket
+  num_inference_steps = 0,      # 0 = model-family default
+  guidance_scale = 0,           # 0 = model-family default
   seed = -1,
   lora = "",
   control_type = "",            # e.g. "canny"; abstract, discover via list_control_types
@@ -111,7 +111,9 @@ edit_image(
 The tool schema shows which forms apply to the current run.
 
 `control_type` preprocesses the source image internally (e.g. canny/depth/pose)
-and steers the edit; it is **SDXL-only**.
+and steers the edit; the valid types and their backing models are configured in
+`server/model.json` (`control_types`) — call `list_control_types` for the
+current set.
 
 ## Prompting conventions
 
@@ -121,25 +123,26 @@ and steers the edit; it is **SDXL-only**.
 - LoRA ids look like `org/repo` and take an optional weight (`:0.8`); verify
   with `list_loras`.
 
-## Model family (SDXL only)
+## Model families
 
-- The server supports the **SDXL family only** (`PICTURA_MODEL` must be an SDXL
-  checkpoint; the default is
-  `stabilityai/stable-diffusion-xl-base-1.0`). txt2img, img2img, LoRA and
-  ControlNet are all supported. Non-SDXL models are rejected at startup.
+- Supported families: **SDXL** (`sdxl`) and **SD3.5** (`sd35-medium` /
+  `sd35-large`); the active model comes from `server/model.json` (`model`).
+  txt2img, img2img, LoRA and ControlNet are all supported. Unsupported
+  families are rejected at startup.
 
 ## Notes
 
-- First calls may download/load models and prefetch; expect them to be slow.
+- First calls load the local models; expect the first generation to be slow
+  (the pipeline builds on first use).
 - **`edit_image` source input**: pass an `http(s)://` URL — a server image URL
   from `generate_image` / `edit_image` / `POST /images/upload` (resolved from
   the in-memory cache) or an external image URL (fetched, SSRF-guarded). On a
   local stdio run a host file path / `file://` URI is also accepted; over
   http/sse the server never reads host files. The tool schema shows which
   mode applies.
-- Sizes: any requested width/height is snapped to the nearest SDXL training
-  bucket (~1MP, multiples of 8) — matching a bucket keeps quality; off-bucket
-  sizes (e.g. 512×512) cause tiled/duplicated patterns.
+- Sizes: any requested width/height is snapped to the nearest native training
+  bucket of the active model family (multiples of 8) — matching a bucket keeps
+  quality; off-bucket sizes (e.g. 512×512) cause tiled/duplicated patterns.
   With `width=0`/`height=0` the source size is snapped too, so the output
   aspect can differ slightly from a non-bucket source.
 - **Privacy**: never write the user's prompt into log files, notes, or other

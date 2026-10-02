@@ -54,7 +54,7 @@ echo "==> every server env var is documented"
 import re
 src = open("server/pictura_server.py").read()
 names = set(re.findall(r'_env\("(PICTURA_[A-Z_]+)"', src))
-names |= {"PICTURA_API_KEY", "PICTURA_LORA_ALLOWLIST", "PICTURA_CONTROLNET_ALLOWLIST"}
+names |= {"PICTURA_API_KEY"}
 docs = open("README.md").read() + open("SPEC.md").read() + open("deploy/pictura-mcp.env.example").read()
 missing = sorted(n for n in names if n not in docs)
 assert not missing, f"env var(s) not documented: {missing}"

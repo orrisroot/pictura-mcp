@@ -4,7 +4,7 @@
       "command": "<PROJECT_ROOT>/.venv/bin/python",
       "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
       "env": {
-        "PICTURA_MODEL": "stabilityai/stable-diffusion-xl-base-1.0"
+        "PICTURA_MODEL_CONFIG": "<PROJECT_ROOT>/server/model.json"
       },
       "requestTimeoutMs": 600000
     }

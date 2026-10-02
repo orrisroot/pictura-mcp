@@ -100,8 +100,7 @@ created=0
 if [[ ! -f "$ENV_FILE" ]]; then
   # Fresh install: build the full env from the template (with machine values).
   cp "$TEMPLATE" "$ENV_FILE"
-  sed -i -e "s|^# PICTURA_MODEL_CACHE_DIR=.*|PICTURA_MODEL_CACHE_DIR=$PROJECT_ROOT/.model-cache|" \
-         -e "s|^# PICTURA_HOST=.*|PICTURA_HOST=0.0.0.0|" \
+  sed -i -e "s|^# PICTURA_HOST=.*|PICTURA_HOST=0.0.0.0|" \
          -e "s|^# PICTURA_PORT=.*|PICTURA_PORT=$PORT|" "$ENV_FILE"
   # Non-loopback binds require PICTURA_PUBLIC_URL; seed it from this host's
   # IP. Edit it to the public URL when the server sits behind a reverse proxy.
@@ -111,7 +110,6 @@ if [[ ! -f "$ENV_FILE" ]]; then
   fi
   created=1
 fi
-CACHE_DIR="$(grep '^PICTURA_MODEL_CACHE_DIR=' "$ENV_FILE" | cut -d= -f2- || true)"
 
 # The API key must be real: generate an sk-pictura-... key when missing/
 # placeholder; an existing custom key is kept.
@@ -143,7 +141,6 @@ else
   # working (no key rotation from the template's placeholder).
   cp "$TEMPLATE" "$NEW_FILE"
   sed -i -e "s#<PROJECT_ROOT>#$PROJECT_ROOT#g" \
-         -e "s|^# PICTURA_MODEL_CACHE_DIR=.*|PICTURA_MODEL_CACHE_DIR=$PROJECT_ROOT/.model-cache|" \
          -e "s|^# PICTURA_HOST=.*|PICTURA_HOST=0.0.0.0|" \
          -e "s|^# PICTURA_PORT=.*|PICTURA_PORT=$PORT|" \
          -e "s|^PICTURA_API_KEY=.*|PICTURA_API_KEY=${cur_key}|" "$NEW_FILE"
@@ -157,10 +154,6 @@ else
   echo "    then merge, drop ${NEW_FILE##*/}, and re-run with --adopt-env"
 fi
 
-if [[ -n $CACHE_DIR ]]; then
-  mkdir -p "$CACHE_DIR"
-  chown -R "$SERVICE_USER":"$SERVICE_USER" "$CACHE_DIR"
-fi
 chmod o-w "$PROJECT_ROOT" 2>/dev/null || true   # keep project read-only for the service user
 chown "$SERVICE_USER":"$SERVICE_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
@@ -169,19 +162,15 @@ echo "==> render & install unit: $UNIT"
 sed -e "s#<PROJECT_ROOT>#$PROJECT_ROOT#g" \
     -e "s#<SERVICE_USER>#$SERVICE_USER#g" \
     "$PROJECT_ROOT/deploy/pictura-mcp.service" > "$UNIT"
-# ProtectSystem=strict blocks writes outside ReadWritePaths; whitelist the
-# model cache dir (and log file, when set) so prefetch/download writes work.
-RW_PATHS=""
-if [[ -n $CACHE_DIR ]]; then RW_PATHS="$CACHE_DIR"; fi
+# ProtectSystem=strict blocks writes outside ReadWritePaths; allow the models
+# dir (Weights are provisioned there by scripts/fetch-models.sh before start)
+# and the log file when set. The '-' prefix tolerates a missing path.
+RW_PATHS="-$PROJECT_ROOT/models"
 if grep -q '^PICTURA_LOG_FILE=' "$ENV_FILE"; then
   LOG_FILE="$(grep '^PICTURA_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
-  [[ -n $RW_PATHS ]] && RW_PATHS="$RW_PATHS $LOG_FILE" || RW_PATHS="$LOG_FILE"
+  RW_PATHS="$RW_PATHS $LOG_FILE"
 fi
-if [[ -n $RW_PATHS ]]; then
-  sed -i "s#^ReadWritePaths=.*#ReadWritePaths=$RW_PATHS#" "$UNIT"
-else
-  sed -i "s#^ReadWritePaths=.*#ReadWritePaths=#" "$UNIT"
-fi
+sed -i "s#^ReadWritePaths=.*#ReadWritePaths=$RW_PATHS#" "$UNIT"
 if grep -q '^PICTURA_LOG_FILE=' "$ENV_FILE"; then
   LOG_FILE="$(grep '^PICTURA_LOG_FILE=' "$ENV_FILE" | cut -d= -f2-)"
   LOG_DIR="$(dirname "$LOG_FILE")"

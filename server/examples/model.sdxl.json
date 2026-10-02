@@ -1,0 +1,62 @@
+{
+  "model": "SG161222/RealVisXL_V5.0",
+  "vae": null,
+  "families": {
+    "sdxl": {
+      "desc": "SDXL",
+      "steps": 30,
+      "guidance": 7.0,
+      "width": 1024,
+      "height": 1024,
+      "auto_vae": "madebyollin/sdxl-vae-fp16-fix",
+      "buckets": [
+        [512, 2048], [512, 1984], [512, 1920], [512, 1856],
+        [576, 1792], [576, 1728], [576, 1664],
+        [640, 1600], [640, 1536],
+        [704, 1472], [704, 1408], [704, 1344],
+        [768, 1344], [768, 1280],
+        [832, 1216], [832, 1152],
+        [896, 1152], [896, 1088],
+        [960, 1088], [960, 1024],
+        [1024, 1024], [1024, 960],
+        [1088, 960], [1088, 896],
+        [1152, 896], [1152, 832],
+        [1216, 832], [1280, 768],
+        [1344, 768], [1344, 704],
+        [1408, 704], [1472, 704],
+        [1536, 640], [1600, 640],
+        [1664, 576], [1728, 576]
+      ]
+    }
+  },
+  "supported_loras": {
+    "ntc-ai/SDXL-LoRA-slider.nice-hands": "improves hands/anatomy (SDXL)",
+    "ntc-ai/SDXL-LoRA-slider.dynamic-anatomy": "more dynamic anatomy (SDXL)",
+    "ntc-ai/SDXL-LoRA-slider.extremely-detailed": "extra detail (SDXL)",
+    "ntc-ai/SDXL-LoRA-slider.raw": "raw/realistic look (SDXL)",
+    "ntc-ai/SDXL-LoRA-slider.asian": "Asian appearance (SDXL)",
+    "ntc-ai/SDXL-LoRA-slider.anime": "anime style (SDXL)",
+    "nerijs/pixel-art-xl": "pixel-art style (SDXL)",
+    "CiroN2022/toy-face": "cute toy/3D face style (SDXL)"
+  },
+  "control_types": {
+    "canny": {
+      "desc": "Canny edge lines (keeps linear structure / line art)",
+      "pre": "opencv_canny",
+      "model": "diffusers/controlnet-canny-sdxl-1.0",
+      "prep_model": null
+    },
+    "depth": {
+      "desc": "Depth map (spatial layout)",
+      "pre": "dpt",
+      "model": "diffusers/controlnet-depth-sdxl-1.0",
+      "prep_model": "Intel/dpt-hybrid-midas"
+    },
+    "openpose": {
+      "desc": "Skeleton / pose",
+      "pre": "yolo_pose",
+      "model": "xinsir/controlnet-openpose-sdxl-1.0",
+      "prep_model": "yolov8n-pose"
+    }
+  }
+}

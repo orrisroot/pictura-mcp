@@ -1,22 +1,25 @@
 """
 Image generation MCP server (MCP 2.x).
 
-Runs an SDXL (Stable Diffusion XL) pipeline (Hugging Face `diffusers`) and
-exposes it as MCP tools over stdio. Uses the local GPU (CUDA) when available.
-SDXL is the supported model family: any SDXL checkpoint (including base or
-finetune variants) can be selected via `PICTURA_MODEL`.
+Runs a local image-generation pipeline (Hugging Face `diffusers`; SDXL or
+Stable Diffusion 3.5 family) and exposes it as MCP tools over stdio / HTTP.
+Uses the local GPU (CUDA) when available.
 
-Configuration (environment variables):
-    PICTURA_MODEL       Hugging Face model id, SDXL family
-                      (default: stabilityai/stable-diffusion-xl-base-1.0;
-                      any SDXL checkpoint/finetune id works)
-    PICTURA_VAE         Optional VAE model id to attach (e.g. for SDXL fp16 fixes)
+Configuration - one JSON file (default server/model.json, override with
+PICTURA_MODEL_CONFIG; deployment-local, presets in server/examples/). It holds
+the base model (path or 'org/repo'), an
+optional VAE, per-family settings ('families' keyed by sdxl / sd35-medium /
+sd35-large: steps/guidance/size/buckets/auto_vae), the supported LoRA ids
+('supported_loras': id -> description map) and the ControlNet types. All weights are plain local
+directories (PICTURA_MODELS_DIR, default <project>/models); provisioning is a
+deployment step (scripts/fetch-models.sh) and the server never downloads.
+
+Environment variables:
+    PICTURA_MODEL_CONFIG     path to the model config JSON (default: server/model.json;
+                             presets in server/examples/*.json)
     PICTURA_DEVICE      cuda | cpu (default: cuda if available else cpu)
     PICTURA_CUDA_DEVICE          restrict CUDA GPUs, e.g. "0" or "0,1" (=> CUDA_VISIBLE_DEVICES)
-    PICTURA_MODEL_CACHE_DIR        model download/cache directory (default: HF cache)
-    PICTURA_LORA_ALLOWLIST          override LoRA allowlist (comma-separated; "*" = any)
-    PICTURA_CONTROLNET_ALLOWLIST    override ControlNet allowlist (comma-separated; "*" = any)
-    PICTURA_SKIP_PREFETCH=1         skip pre-downloading allowlisted models at startup
+    PICTURA_MODELS_DIR           root of the standard local model layout (default: <project>/models)
     PICTURA_MAX_CONCURRENT          concurrent rendering slots (default "auto": sized
                                   from measured free VRAM; integer pins the pool;
                                   1 = strictly serial). Each slot is an independent
@@ -37,12 +40,14 @@ URL image return (http/sse only):
     PICTURA_IMAGE_UPLOAD_TICKET_TTL  upload_image one-time token TTL, seconds
                                   (default 120)
 
-Client-supplied `lora` ids are restricted to a built-in default allowlist
-(override via PICTURA_LORA_ALLOWLIST); URLs/local paths are rejected and weights
-load safetensors-only. ControlNet is exposed as an abstract `control_type`
-(e.g. 'canny'); the backing model/preprocessor stay server-side and are picked
-from an internal allowlist (PICTURA_CONTROLNET_ALLOWLIST). Allowlisted models are
-pre-downloaded into the cache at service startup.
+Client-supplied `lora` ids are restricted to the supported LoRA ids in the
+model config (model.json -> 'supported_loras', an id -> description map;
+"*" = any).
+URLs/local paths are rejected and weights load safetensors-only. ControlNet is
+exposed as an abstract `control_type` (e.g. 'canny'); the backing model and
+preprocessor are configured server-side in the same config ('control_types')
+and hidden from clients. A missing local model surfaces as a clear provisioning
+error pointing at scripts/fetch-models.sh.
 
 `edit_image` takes an http(s) URL for the source image - a short-lived server
 image URL (from generate_image / edit_image / POST /images/upload) or an
@@ -183,8 +188,9 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # Config
 # --------------------------------------------------------------------------
 
-MODEL_ID = _env("PICTURA_MODEL", "stabilityai/stable-diffusion-xl-base-1.0")
-VAE_ID: str | None = _env("PICTURA_VAE") or None
+# The active base model lives in the single model config file (see below);
+# The active base model lives in the single model config file (see below);
+# 'vae' is an optional field there - no model env vars are read.
 DEVICE = (_env("PICTURA_DEVICE", "cuda") or "cuda").lower()
 
 # Restrict which CUDA GPU(s) are used, e.g. PICTURA_CUDA_DEVICE=0 or 0,1.
@@ -194,11 +200,24 @@ if _cuda_visible:
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda_visible
     _log(f"CUDA_VISIBLE_DEVICES -> {_cuda_visible}")
 
-# Optional model download/cache directory (overrides the default HF cache).
-CACHE_DIR: str | None = _env("PICTURA_MODEL_CACHE_DIR") or None
-if CACHE_DIR:
-    os.environ.setdefault("HF_HOME", CACHE_DIR)
-    os.environ.setdefault("HF_HUB_CACHE", str(Path(CACHE_DIR) / "hub"))
+# Standard local model layout: all weights (base models, VAE, LoRA,
+# ControlNet, preprocessors) are plain directories under PICTURA_MODELS_DIR
+# (default: <project>/models). 'org/repo' ids in the config resolve to
+# models/<org>/<repo>; relative paths resolve from the project root;
+# provisioning is a deployment step (scripts/fetch-models.sh) - the server
+# never contacts Hugging Face.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+MODELS_ROOT = os.path.abspath(_env("PICTURA_MODELS_DIR") or os.path.join(PROJECT_ROOT, "models"))
+
+
+def _resolve_local(p: str) -> str:
+    """Resolve a config path: absolute as-is, relative from the project root."""
+    p = (p or "").strip()
+    if not p:
+        return p
+    if os.path.isabs(p):
+        return p
+    return os.path.abspath(os.path.join(PROJECT_ROOT, p))
 
 # --------------------------------------------------------------------------
 # Image delivery: short-term in-memory cache + download-URL return (http/sse)
@@ -348,48 +367,226 @@ def _bind_base(host: str, port: int) -> str | None:
         return None
     return f"http://{host}:{port}"
 
-# Default allowlists for client-supplied LoRA / ControlNet ids.
-# Override with PICTURA_LORA_ALLOWLIST / PICTURA_CONTROLNET_ALLOWLIST
-# (comma-separated; "*" = allow any bare 'org/repo' id). ControlNet ids are
-# internal (hidden from clients) - clients only see abstract control types.
-DEFAULT_LORA_ALLOWLIST = ["nerijs/pixel-art-xl", "CiroN2022/toy-face"]
-DEFAULT_CONTROLNET_ALLOWLIST = [
-    "diffusers/controlnet-canny-sdxl-1.0",
-    "diffusers/controlnet-depth-sdxl-1.0",
-    "xinsir/controlnet-openpose-sdxl-1.0",
-]
+# ---------------------------------------------------------------------------
+# Single-file configuration (server/model.json, override: PICTURA_MODEL_CONFIG)
+# ---------------------------------------------------------------------------
+# All model-adjacent settings live in ONE JSON file:
+#   {
+#     "model":          "/path/to/model/dir" or "org/repo" of the active model,
+#     "supported_loras": ["org/repo-a", ...]   or  ["*"] for any id,
+#     "control_types": {
+#       "canny": {"desc": "...", "pre": "opencv_canny",
+#                 "model": "org/repo-cn", "prep_model": null},
+#       "depth": {"desc": "...", "pre": "dpt",
+#                 "model": "org/repo-cn", "prep_model": "org/preprocessor"}
+#     }
+#   }
+# No env-level lists, no per-family keys, no built-in fallbacks. Preset
+# configurations for other model families live in server/examples/*.json.
 
-# Abstract control types -> internal preprocessor + ControlNet model.
-# Clients pass only the *type* (e.g. "canny"); the model id stays server-side.
-_CONTROL_TYPES: dict[str, dict] = {
-    "canny": {
-        "desc": "Canny edge lines (keeps linear structure / line art)",
-        "pre": "opencv_canny",
-        "model": "diffusers/controlnet-canny-sdxl-1.0",
-        "prep_model": None,
-        "supported": True,
-    },
-    "depth": {
-        "desc": "Depth map (spatial layout)",
-        "pre": "dpt",
-        "model": "diffusers/controlnet-depth-sdxl-1.0",
-        "prep_model": "Intel/dpt-hybrid-midas",
-        "supported": True,
-    },
-    "openpose": {
-        "desc": "Skeleton / pose",
-        "pre": "yolo_pose",
-        "model": "xinsir/controlnet-openpose-sdxl-1.0",
-        "prep_model": "yolov8n-pose",
-        "supported": True,
-    },
-}
+_MODEL_CONFIG_PATH = _env("PICTURA_MODEL_CONFIG") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "model.json"
+)
+_model_config_cache: dict | None = None
 
-IS_XL = "xl" in MODEL_ID.lower()  # the server requires an SDXL model (checked in main)
 
-# Default resolution / steps (SDXL).
-STEPS_DEFAULT = 30
-W_DEFAULT, H_DEFAULT = 1024, 1024
+def _model_config() -> dict:
+    """Load the model config JSON (cached). Raises with a clear message when
+    the file is missing or invalid - the server cannot run without it."""
+    global _model_config_cache
+    if _model_config_cache is not None:
+        return _model_config_cache
+    cfg = None
+    if os.path.exists(_MODEL_CONFIG_PATH):
+        try:
+            import json as _json
+
+            with open(_MODEL_CONFIG_PATH, "r", encoding="utf-8") as fh:
+                loaded = _json.load(fh)
+            if isinstance(loaded, dict):
+                cfg = loaded
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"model config {_MODEL_CONFIG_PATH} is invalid: {e}") from e
+    if cfg is None:
+        raise RuntimeError(
+            f"model config not found: {_MODEL_CONFIG_PATH} "
+            "(create server/model.json or set PICTURA_MODEL_CONFIG)"
+        )
+    _model_config_cache = cfg
+    return cfg
+
+
+def _model_id() -> str:
+    """Active base model id / local path (config['model'])."""
+    mid = (_model_config().get("model") or "").strip()
+    if not mid:
+        raise ValueError(f"model config {_MODEL_CONFIG_PATH}: 'model' is required")
+    return mid
+
+
+def _vae_id():
+    """Optional custom VAE override (config['vae']); None = auto."""
+    vae = (_model_config().get("vae") or "").strip()
+    return vae or None
+
+
+def _local_dir(repo_id: str) -> str:
+    """Map a config/client 'org/repo' id (or local path) to its model dir.
+
+    Existing directories are returned unchanged - absolute paths as-is,
+    relative paths from the project root (e.g. 'models/sd35-large');
+    'org/repo' ids resolve to <MODELS_ROOT>/<org>/<repo> provisioned by
+    scripts/fetch-models.sh. The server never downloads - a missing directory
+    surfaces as a clear provisioning error at load time.
+    """
+    repo_id = (repo_id or "").strip()
+    if os.path.isdir(repo_id):
+        return os.path.abspath(repo_id)
+    resolved = _resolve_local(repo_id)
+    if os.path.isdir(resolved):
+        return resolved
+    if not _REPO_ID_RE.match(repo_id):
+        raise ValueError(f"{repo_id!r} is not a provisioned local dir or 'org/repo' id")
+    org, repo = repo_id.split("/", 1)
+    return os.path.join(MODELS_ROOT, org, repo)
+
+
+def _lora_weight_file(local_dir: str):
+    """The LoRA weights file in a plain local dir: the canonical name first,
+    otherwise the largest *.safetensors present."""
+    d = str(local_dir)
+    cand = os.path.join(d, "pytorch_lora_weights.safetensors")
+    if os.path.exists(cand):
+        return cand
+    try:
+        files = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".safetensors")]
+    except OSError:
+        return None
+    if not files:
+        return None
+    return max(files, key=os.path.getsize)
+
+
+def _supported_loras():
+    """Supported client-supplied LoRA ids: a set, or None when '*' (any id).
+    The config may be a plain list or an id -> description map."""
+    ids = _model_config().get("supported_loras")
+    if ids == "*" or (isinstance(ids, list) and "*" in ids) or (isinstance(ids, dict) and "*" in ids):
+        return None
+    if isinstance(ids, dict):
+        return {k for k in ids if isinstance(k, str) and k.strip()}
+    if isinstance(ids, list):
+        return {i for i in ids if isinstance(i, str) and i.strip()}
+    return set()
+
+
+def _lora_meta() -> dict:
+    """id -> description map from the config (for list_loras)."""
+    ids = _model_config().get("supported_loras")
+    if isinstance(ids, dict):
+        return {k: (v or "") for k, v in ids.items() if isinstance(k, str)}
+    return {}
+
+
+def _control_types() -> dict:
+    """Configured control types -> {desc, pre, model, prep_model}."""
+    table = _model_config().get("control_types")
+    out = {}
+    if isinstance(table, dict):
+        for ctype, info in table.items():
+            if not isinstance(info, dict):
+                continue
+            model = info.get("model")
+            pre = info.get("pre")
+            if not isinstance(model, str) or not model or not isinstance(pre, str) or not pre:
+                continue
+            out[ctype] = {
+                "desc": info.get("desc", ctype),
+                "pre": pre,
+                "model": model,
+                "prep_model": info.get("prep_model"),
+            }
+    return out
+
+
+_FAMILY_CACHE: str | None = None
+
+
+def _model_family() -> str:
+    """Detect the pipeline family of the configured model ("sdxl", "sd35-medium",
+    "sd35-large" or "krea2"): local dirs are inspected via model_index.json
+    (and the transformer config); repo ids fall back to the id/name string."""
+    global _FAMILY_CACHE
+    if _FAMILY_CACHE is not None:
+        return _FAMILY_CACHE
+    mid = _local_dir(_model_id())
+    fam = "sdxl" if "xl" in mid.lower() else _sd35_variant_from_id()
+    idx = os.path.join(mid, "model_index.json") if os.path.isdir(mid) else None
+    if idx and os.path.exists(idx):
+        try:
+            import json as _json
+
+            with open(idx, "r", encoding="utf-8") as fh:
+                klass = (_json.load(fh).get("config", {}).get("diffusers", {}).get("_class_name") or "")
+        except Exception:  # noqa: BLE001
+            klass = ""
+        if "StableDiffusion3" in klass:
+            fam = _sd35_variant_from_id() or _sd35_variant_from_index()
+        elif "Krea2" in klass:
+            fam = "krea2"
+        elif "StableDiffusionXL" in klass:
+            fam = "sdxl"
+    _FAMILY_CACHE = fam
+    return fam
+
+
+def _sd35_variant_from_id() -> str:
+    """SD3.5 variant guessed from the configured model id/name string."""
+    name = _model_id().lower()
+    if "large" in name:
+        return "sd35-large"
+    return "sd35-medium"
+
+
+def _sd35_variant_from_index() -> str:
+    """SD3.5 variant from the local model's transformer config."""
+    mid = _local_dir(_model_id())
+    try:
+        import json as _json
+
+        with open(os.path.join(mid, "transformer", "config.json"), "r", encoding="utf-8") as fh:
+            cfg = _json.load(fh)
+    except Exception:  # noqa: BLE001
+        return _sd35_variant_from_id()
+    if cfg.get("num_layers", 0) > 30 or cfg.get("caption_projection_dim", 0) > 2048:
+        return "sd35-large"
+    return "sd35-medium"
+
+# Per-family generation settings live in the config (model.json 'families'
+# keyed by the internal family id: sdxl / sd35-medium / sd35-large). The code
+# only knows how to find them - no per-family constants.
+def _family_defaults() -> dict:
+    """Generation settings of the active family (steps/guidance/size/desc/
+    auto_vae) from config['families'][<family id>]."""
+    fam = _model_family()
+    fam_cfg = (_model_config().get("families") or {}).get(fam) or {}
+    if not fam_cfg:
+        raise ValueError(f"model config {_MODEL_CONFIG_PATH}: missing 'families.{fam}'")
+    return {
+        "desc": fam_cfg.get("desc", fam),
+        "steps": int(fam_cfg.get("steps", 40)),
+        "guidance": float(fam_cfg.get("guidance", 4.5)),
+        "w": int(fam_cfg.get("width", 1024)),
+        "h": int(fam_cfg.get("height", 1024)),
+        "auto_vae": fam_cfg.get("auto_vae"),
+    }
+
+def _fd(key):
+    """Module-level accessor for the active family settings. Field annotations
+    are re-evaluated by the MCP runtime with module globals only, so tool
+    descriptions must not reference _build_server locals."""
+    return _family_defaults()[key]
+
 
 # --------------------------------------------------------------------------
 # Slot pool: concurrent rendering on one GPU
@@ -447,7 +644,8 @@ def _compute_slots(info: dict) -> int:
         free_gb = torch.cuda.mem_get_info()[0] / 1e9
     except Exception:  # noqa: BLE001
         return 1
-    pixels = (W_DEFAULT * H_DEFAULT) / 1e6
+    _d = _family_defaults()
+    pixels = (_d["w"] * _d["h"]) / 1e6
     act = _SLOT_ACT_BASE_GB + _SLOT_ACT_PER_MPX_GB * pixels
     if "float16" not in str(info.get("dtype")):
         act *= 2  # fp32 activations roughly double
@@ -521,33 +719,54 @@ def _build_txt(slot):
     dtype = torch.float16 if device == "cuda" else torch.float32
     model_kwargs: dict = {"dtype": dtype}
 
-    if not IS_XL:
+    family = _model_family()
+    if not (family == "sdxl" or family.startswith("sd35")):
         raise ValueError(
-            f"PICTURA_MODEL={MODEL_ID!r} is not an SDXL model: this server "
-            "supports the SDXL family only"
+            f"model={_model_id()!r} is not a supported model family "
+            f"(detected '{family}'; supported: sdxl, sd35-medium, sd35-large)"
         )
 
-    _log(f"Loading model {MODEL_ID} (slot {_slots.index(slot)}) ...")
+    if family.startswith("sd35"):
+        from diffusers import StableDiffusion3Pipeline
+
+        pipe_cls = StableDiffusion3Pipeline
+    else:
+        pipe_cls = StableDiffusionXLPipeline
+
+    _log(f"Loading model {_model_id()} (slot {_slots.index(slot)}) ...")
     t0 = time.time()
 
-    try:
-        if VAE_ID:
-            from diffusers import AutoencoderKL
+    attempts = [dict(model_kwargs)]
+    if dtype == torch.float16:
+        attempts.insert(0, {**model_kwargs, "variant": "fp16"})
+    attempts.append({})
+    pipe = None
+    last_err = None
+    model_dir = _local_dir(_model_id())
+    for attempt in attempts:
+        try:
+            if _vae_id() and family == "sdxl":
+                from diffusers import AutoencoderKL
 
-            vae = AutoencoderKL.from_pretrained(VAE_ID, dtype=dtype, low_cpu_mem_usage=False)
-            pipe = StableDiffusionXLPipeline.from_pretrained(
-                MODEL_ID, vae=vae, low_cpu_mem_usage=False, **model_kwargs
-            )
-        else:
-            pipe = StableDiffusionXLPipeline.from_pretrained(MODEL_ID, **model_kwargs)
-    except Exception:
-        # Retry with lower precision headroom (some repos are fp32-safetensors only).
-        _log("Initial load failed, retrying with default precision...")
-        model_kwargs.pop("dtype", None)
-        model_kwargs.pop("vae", None)
-        pipe = StableDiffusionXLPipeline.from_pretrained(
-            MODEL_ID, low_cpu_mem_usage=False, **model_kwargs
-        )
+                vae = AutoencoderKL.from_pretrained(
+                    _local_dir(_vae_id()), dtype=attempt.get("dtype"), low_cpu_mem_usage=False
+                )
+                pipe = pipe_cls.from_pretrained(
+                    model_dir, vae=vae, low_cpu_mem_usage=False, **attempt
+                )
+            else:
+                pipe = pipe_cls.from_pretrained(
+                    model_dir, low_cpu_mem_usage=False, **attempt
+                )
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            _log("Initial load failed, retrying with alternate precision/variant...")
+    if pipe is None:
+        raise ValueError(
+            f"{last_err}\n  not provisioned? run: sudo scripts/fetch-models.sh "
+            f"(models dir: {MODELS_ROOT})"
+        ) from last_err
     slot.txt = pipe
 
     # ---- memory optimizations for low-VRAM cards -----------------------------
@@ -567,16 +786,23 @@ def _build_txt(slot):
     # ---- fp16 VAE NaN / black-image guard for SDXL ---------------------------
     # Done BEFORE device placement so the swapped VAE is included by the
     # offload hooks or the .to(device) move below.
-    if dtype == torch.float16:
-        if not VAE_ID:
-            # Use the fp16-safe VAE (works in fp16 directly, no fp32 upcast or
-            # vae-tiling precision conflicts).
-            from diffusers import AutoencoderKL
+    if dtype == torch.float16 and family == "sdxl":
+        auto_vae = _family_defaults().get("auto_vae")
+        if not _vae_id():
+            if auto_vae:
+                # fp16-safe VAE from the family config (avoids fp16 NaN/black).
+                from diffusers import AutoencoderKL
 
-            _log("SDXL: using fp16-safe VAE madebyollin/sdxl-vae-fp16-fix")
-            pipe.vae = AutoencoderKL.from_pretrained(
-                "madebyollin/sdxl-vae-fp16-fix", dtype=dtype, low_cpu_mem_usage=False
-            )
+                _log(f"SDXL: using fp16-safe VAE {auto_vae}")
+                pipe.vae = AutoencoderKL.from_pretrained(
+                    _local_dir(auto_vae), dtype=dtype, low_cpu_mem_usage=False
+                )
+            else:
+                try:
+                    pipe.upcast_vae()
+                    _log("SDXL: upcast_vae() enabled to avoid fp16 black-image artifacts")
+                except Exception as e:  # noqa: BLE001
+                    _log(f"SDXL upcast_vae skipped: {e}")
         else:
             # User-explicit VAE: keep decode in fp32 to avoid NaN/black output.
             try:
@@ -596,7 +822,8 @@ def _build_txt(slot):
         # cards, so spill to CPU up front when the default resolution needs
         # the headroom. Only slot 0 does this: extra slots exist precisely
         # because weights fit, and offloading would stall concurrent jobs.
-        proactive_offload = is_first and (W_DEFAULT >= 768 or H_DEFAULT >= 768)
+        _d = _family_defaults()
+        proactive_offload = is_first and (_d["w"] >= 768 or _d["h"] >= 768)
         if proactive_offload or weights_gb > 0.8 * vram_gb:
             _log(
                 f"(proactive_offload={proactive_offload}, weights {weights_gb:.1f}/"
@@ -621,7 +848,7 @@ def _build_txt(slot):
         pass
 
     slot.info = {
-        "model": MODEL_ID,
+        "model": _model_id(),
         "device": device,
         "dtype": str(dtype),
         "offload": offloaded,
@@ -967,55 +1194,40 @@ def _load_source_image(image_src: str, server_origins: frozenset = frozenset()):
     )
 
 
-# Official SDXL ~1MP aspect-ratio buckets (App. I of the SDXL paper): every
-# entry is a resolution the model was actually trained on, with areas close to
-# 1024x1024. Generation snaps to the nearest bucket - off-bucket sizes (e.g.
-# 512x512) cause the tiled/duplicated-pattern artifacts typical of SDXL.
-_SDXL_BUCKET_PAIRS = (
-    (512, 2048), (512, 1984), (512, 1920), (512, 1856),
-    (576, 1792), (576, 1728), (576, 1664),
-    (640, 1600), (640, 1536),
-    (704, 1472), (704, 1408), (704, 1344),
-    (768, 1344), (768, 1280),
-    (832, 1216), (832, 1152),
-    (896, 1152), (896, 1088),
-    (960, 1088), (960, 1024),
-    (1024, 1024), (1024, 960),
-    (1088, 960), (1088, 896),
-    (1152, 896), (1152, 832),
-    (1216, 832),
-    (1280, 768),
-    (1344, 768), (1344, 704),
-    (1408, 704),
-    (1472, 704),
-    (1536, 640),
-    (1600, 640),
-    (1664, 576),
-    (1728, 576),
-)
-_SDXL_BUCKETS: tuple[tuple[int, int], ...] = tuple(
-    sorted({(w, h) for w, h in _SDXL_BUCKET_PAIRS} | {(h, w) for w, h in _SDXL_BUCKET_PAIRS})
-)
+def _active_buckets() -> tuple:
+    """Native resolution buckets of the active family, from the config
+    ('families.<id>.buckets'); rotations are added automatically."""
+    fam_cfg = (_model_config().get("families") or {}).get(_model_family()) or {}
+    pairs = [
+        tuple(p)
+        for p in (fam_cfg.get("buckets") or [])
+        if isinstance(p, (list, tuple)) and len(p) == 2
+    ]
+    if not pairs:
+        return ((1024, 1024),)
+    return tuple(sorted({(w, h) for w, h in pairs} | {(h, w) for w, h in pairs}))
 
 
 def _snap_bucket(width: int, height: int) -> tuple[int, int]:
     """Sanitize a requested size (>= 256, multiple of 8), then snap the pair to
-    the nearest SDXL training bucket (~1MP).
+    the nearest native bucket of the active model family (config-driven).
 
-    The request is first scaled to the ~1MP bucket area (aspect ratio kept),
+    The request is first scaled to the native bucket area (aspect ratio kept),
     then the nearest bucket is picked by log-space per-axis distance, so the
     output keeps the requested aspect ratio while staying on a trained bucket
     (e.g. a 1:1 request snaps to the 1024x1024 bucket, not to a near-square).
     """
     w = max(256, round(width / 8) * 8)
     h = max(256, round(height / 8) * 8)
-    if (w, h) in _SDXL_BUCKETS:
+    buckets = _active_buckets()
+    if (w, h) in buckets:
         return w, h
-    # Normalize the request to the ~1MP bucket area, preserving aspect ratio.
-    scale = math.sqrt((W_DEFAULT * H_DEFAULT) / (w * h))
+    # Normalize the request to the native bucket area, preserving aspect ratio.
+    d = _family_defaults()
+    scale = math.sqrt((d["w"] * d["h"]) / (w * h))
     tw, th = w * scale, h * scale
     return min(
-        _SDXL_BUCKETS,
+        buckets,
         key=lambda b: math.log(tw / b[0]) ** 2 + math.log(th / b[1]) ** 2,
     )
 
@@ -1023,7 +1235,7 @@ def _snap_bucket(width: int, height: int) -> tuple[int, int]:
 def _edit_dim(v: int) -> int:
     """Round an edit_image width/height. 0 = keep source size; any positive
     value is rounded to a multiple of 8 (>= 256); the pair is later snapped to
-    an SDXL bucket by `_i2i_dims`."""
+    an active-family bucket by `_i2i_dims`."""
     if v <= 0:
         return 0
     return max(256, round(v / 8) * 8)
@@ -1031,7 +1243,7 @@ def _edit_dim(v: int) -> int:
 
 def _i2i_dims(source_w: int, source_h: int, width: int, height: int):
     """Resolve target dimensions: explicit width/height, else source size,
-    then snap the pair to the nearest SDXL bucket (~1MP)."""
+    then snap the pair to the nearest active-family bucket."""
     w = width or source_w
     h = height or source_h
     return _snap_bucket(w, h)
@@ -1063,77 +1275,27 @@ _REPO_ID_RE = _re.compile(
 )
 
 
-def _allowlist(env: str, default) -> set | None:
-    """Resolve an allowlist: env override, else the built-in default.
-    "*" disables the allowlist (any bare 'org/repo' id passes syntax check)."""
-    raw = (_env(env) or "").strip()
-    if raw == "*":
-        return None
-    if raw:
-        return {x.strip() for x in raw.split(",") if x.strip()}
-    return set(default)
-
-
-def _check_model_id(kind: str, mid: str, allowlist_env: str, default) -> str:
-    """Validate a client-supplied model id.
+def _check_model_id(kind: str, mid: str, supported) -> str:
+    """Validate a model id.
 
     Only bare HuggingFace 'org/repo' ids are accepted - URLs, absolute paths,
     relative paths and traversal are rejected (the ids feed from_pretrained /
     load_lora_weights, which would otherwise fetch from arbitrary URLs or load
     arbitrary host paths - SSRF / pickle-deserialization risks).
-    The allowlist (env override else the built-in default; "*" = any id) is
-    enforced, and weights load safetensors-only.
+    `supported` is a set of ids (client-supplied LoRAs) or None for any id
+    (server-configured ControlNet ids).
     """
     mid = mid.strip()
     if not mid:
         raise ValueError(f"{kind}: empty model id")
-    allowed = _allowlist(allowlist_env, default)
-    if allowed is not None and mid not in allowed:
-        raise ValueError(
-            f"{kind} '{mid}' is not in the allowlist (see {allowlist_env} / built-in defaults)"
-        )
+    if supported is not None and mid not in supported:
+        raise ValueError(f"{kind} '{mid}' is not in the supported LoRA ids (model.json 'supported_loras')")
     if not _REPO_ID_RE.match(mid):
         raise ValueError(
             f"{kind} '{mid}' must be a bare 'org/repo' Hugging Face id "
             "(URLs and local file paths are not allowed)"
         )
     return mid
-
-
-def _prefetch_allowlisted() -> None:
-    """Pre-download the allowlisted LoRA / ControlNet repos into the cache dir.
-
-    Called once at service startup so tool calls do not pay the download cost.
-    Failures are logged and non-fatal (models can still be fetched lazily).
-    """
-    from huggingface_hub import snapshot_download
-
-    ids = list(_allowlist("PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST) or DEFAULT_LORA_ALLOWLIST)
-    ids += [info["model"] for info in _CONTROL_TYPES.values() if info.get("supported")]
-    for mid in dict.fromkeys(ids):
-        _log(f"prefetching {mid} ...")
-        try:
-            snapshot_download(
-                repo_id=mid,
-                cache_dir=CACHE_DIR,
-                allow_patterns=["*.safetensors", "*.json", "*.txt", "*.md", "*.model"],
-            )
-            _log(f"prefetched {mid}")
-        except Exception as e:  # noqa: BLE001
-            _log(f"prefetch failed for {mid}: {e}")
-    # preprocessor weights for supported control types
-    prep = _CONTROL_TYPES["depth"].get("prep_model")
-    if prep:
-        _log(f"prefetching preprocessor {prep} ...")
-        try:
-            snapshot_download(repo_id=prep, cache_dir=CACHE_DIR, allow_patterns=["*.bin", "*.json"])
-            _log(f"prefetched preprocessor {prep}")
-        except Exception as e:  # noqa: BLE001
-            _log(f"prefetch failed for preprocessor {prep}: {e}")
-    try:
-        _download_yolo_pose()
-    except Exception as e:  # noqa: BLE001
-        _log(f"prefetch failed for yolov8n-pose: {e}")
 
 
 def _parse_lora(spec: str):
@@ -1151,11 +1313,104 @@ def _parse_lora(spec: str):
     return out
 
 
+def _convert_kohya_sd3_lora(state_dict) -> dict:
+    """Convert a kohya-SD3 ('lora_unet_joint_blocks_*') LoRA state dict to the
+    diffusers-native SD3 naming ('transformer.transformer_blocks.*' with
+    lora_A / lora_B). The kohya alpha/rank scale is baked into the weights.
+
+    Mapping (per block i, for the 'x' image and 'context' text branches):
+      adaLN_modulation_1 -> norm1.linear / norm1_context.linear
+      attn_qkv           -> attn.to_q/k/v   / attn.add_q/k/v_proj (split)
+      attn_proj          -> attn.to_out.0   / attn.to_add_out
+      mlp_fc1/fc2        -> ff.net.0.proj/2 / ff_context.net.0.proj/2
+    """
+    import math
+    import re as _re
+
+    import torch
+
+    pat = _re.compile(
+        r"^lora_unet_joint_blocks_(?P<i>\d+)_(?P<side>x|context)_block_"
+        r"(?P<mod>[a-zA-Z0-9_]+)\.(?P<part>lora_down|lora_up|alpha)(\.weight)?$"
+    )
+    mods: dict = {}
+    for k, v in state_dict.items():
+        m = pat.match(k)
+        if not m:
+            continue
+        mods.setdefault((m["side"], int(m["i"]), m["mod"]), {})[m["part"]] = v
+
+    direct = {
+        ("x", "attn_proj"): "attn.to_out.0",
+        ("x", "mlp_fc1"): "ff.net.0.proj",
+        ("x", "mlp_fc2"): "ff.net.2",
+        ("x", "adaLN_modulation_1"): "norm1.linear",
+        ("context", "attn_proj"): "attn.to_add_out",
+        ("context", "mlp_fc1"): "ff_context.net.0.proj",
+        ("context", "mlp_fc2"): "ff_context.net.2",
+        ("context", "adaLN_modulation_1"): "norm1_context.linear",
+    }
+    qkv = {
+        ("x", "attn_qkv"): ["attn.to_q", "attn.to_k", "attn.to_v"],
+        ("context", "attn_qkv"): ["attn.add_q_proj", "attn.add_k_proj", "attn.add_v_proj"],
+    }
+
+    out = {}
+    for (side, i, mod), parts in mods.items():
+        down = parts.get("lora_down")
+        up = parts.get("lora_up")
+        if down is None or up is None:
+            continue
+        rank = down.shape[0]
+        alpha = float(parts["alpha"]) if "alpha" in parts else float(rank)
+        scale = math.sqrt(alpha / rank)
+        prefix = f"transformer.transformer_blocks.{i}"
+        key = (side, mod)
+        if key in qkv:
+            heads = qkv[key]
+            hdim = up.shape[0] // len(heads)
+            up_s = up * scale
+            for op in heads:
+                out[f"{prefix}.{op}.lora_A.weight"] = down * scale
+            for chunk, op in zip(torch.split(up_s, hdim, dim=0), heads):
+                out[f"{prefix}.{op}.lora_B.weight"] = chunk
+        else:
+            dst = direct.get(key)
+            if dst is None:
+                _log(f"kohya sd3 lora: skipping unmapped key {side}/{mod}")
+                continue
+            base = f"{prefix}.{dst}"
+            out[f"{base}.lora_A.weight"] = down * scale
+            out[f"{base}.lora_B.weight"] = up * scale
+    return out
+
+
+def _maybe_convert_kohya_sd3_lora(mid: str):
+    """Return a diffusers-native state dict for a kohya-SD3 LoRA, or None when
+    the repo is not a kohya-SD3 LoRA (then the regular loader is used)."""
+    path = _lora_weight_file(_local_dir(mid))
+    if not path:
+        return None
+    try:
+        from safetensors.torch import load_file
+
+        state = load_file(path)
+    except Exception as e:  # noqa: BLE001
+        _log(f"lora load failed for {mid}: {e}")
+        return None
+    if not any(k.startswith("lora_unet_joint_blocks_") for k in state):
+        return None
+    converted = _convert_kohya_sd3_lora(state)
+    _log(f"kohya-SD3 LoRA {mid}: converted {len(state)} -> {len(converted)} keys")
+    return converted
+
+
 def _apply_loras(pipe, spec: str) -> None:
     """Load/apply (or clear) LoRA adapters on a pipeline.
 
     The spec is comma-separated 'huggingface/model:weight' entries (weight
-    defaults to 1.0). Adapters are downloaded from the HF cache.
+    defaults to 1.0). Adapters are plain local dirs (models/<org>/<repo>),
+    provisioned by scripts/fetch-models.sh.
     """
     try:
         pipe.unload_lora_weights()
@@ -1164,18 +1419,34 @@ def _apply_loras(pipe, spec: str) -> None:
     entries = _parse_lora(spec)
     if not entries:
         return
+    family = _model_family()
+    if not (family == "sdxl" or family.startswith("sd35")):
+        raise ValueError("LoRA adapters are not supported for this model family")
     with _LORA_LOCK:
         names, weights = [], []
         for i, (mid, weight) in enumerate(entries):
             name = f"lora{i}"
-            _check_model_id("LoRA", mid, "PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
-            pipe.load_lora_weights(
-                mid,
-                adapter_name=name,
-                use_safetensors=True,
-                cache_dir=CACHE_DIR,
-                low_cpu_mem_usage=False,
+            _check_model_id("LoRA", mid, _supported_loras())
+            lora_state = (
+                _maybe_convert_kohya_sd3_lora(mid)
+                if _model_family().startswith("sd35")
+                else None
             )
+            try:
+                if lora_state is not None:
+                    pipe.load_lora_weights(lora_state, adapter_name=name)
+                else:
+                    pipe.load_lora_weights(
+                        _local_dir(mid),
+                        adapter_name=name,
+                        use_safetensors=True,
+                        low_cpu_mem_usage=False,
+                    )
+            except Exception as e:  # noqa: BLE001
+                raise ValueError(
+                    f"LoRA '{mid}' could not be loaded: {e}\n"
+                    "  not provisioned? run: sudo scripts/fetch-models.sh"
+                ) from e
             names.append(name)
             weights.append(weight)
         pipe.set_adapters(names, adapter_weights=weights)
@@ -1190,16 +1461,10 @@ def _resolve_control(ctype: str) -> dict:
     ctype = (ctype or "").strip().lower()
     if not ctype:
         raise ValueError("control_type is empty")
-    info = _CONTROL_TYPES.get(ctype)
+    info = _control_types().get(ctype)
     if info is None:
-        raise ValueError(f"unknown control_type '{ctype}'; available: {list(_CONTROL_TYPES)}")
-    if not info.get("supported"):
-        raise ValueError(
-            f"control_type '{ctype}' is not yet supported by the installed preprocessor"
-        )
-    _check_model_id(
-        "ControlNet", info["model"], "PICTURA_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST
-    )
+        raise ValueError(f"unknown control_type '{ctype}'; available: {list(_control_types())}")
+    _check_model_id("ControlNet", info["model"], None)
     return info
 
 
@@ -1244,12 +1509,13 @@ def _preprocess_depth_locked(image):
     from transformers import DPTForDepthEstimation, DPTImageProcessor
 
     global _dpt_processor, _dpt_model
-    mid = _CONTROL_TYPES["depth"]["prep_model"]
+    mid = _control_types().get("depth", {}).get("prep_model")
     if _dpt_model is None:
-        _log(f"Loading depth preprocessor {mid} ...")
-        _dpt_processor = DPTImageProcessor.from_pretrained(mid, cache_dir=CACHE_DIR)
+        prep_dir = _local_dir(mid)
+        _log(f"Loading depth preprocessor {prep_dir} ...")
+        _dpt_processor = DPTImageProcessor.from_pretrained(prep_dir)
         _dpt_model = DPTForDepthEstimation.from_pretrained(
-            mid, cache_dir=CACHE_DIR, low_cpu_mem_usage=False
+            prep_dir, low_cpu_mem_usage=False
         )
         _dpt_model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
     enc = _dpt_processor(images=image, return_tensors="pt")
@@ -1275,20 +1541,18 @@ _OPENPOSE_COLORS = [
 
 
 def _yolo_pose_path() -> Path:
-    base = Path(CACHE_DIR) if CACHE_DIR else Path.home() / ".cache"
-    return base / "yolov8n-pose.pt"
+    return Path(MODELS_ROOT) / "yolov8n-pose.pt"
 
 
-def _download_yolo_pose() -> None:
-    import urllib.request
-
+def _ensure_yolo_pose_local() -> None:
+    """Require the local YOLO pose weights (offline deployment step)."""
     p = _yolo_pose_path()
     if p.exists():
         return
-    p.parent.mkdir(parents=True, exist_ok=True)
-    url = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-pose.pt"
-    _log(f"Downloading {p.name} ...")
-    urllib.request.urlretrieve(url, p)
+    raise FileNotFoundError(
+        f"openpose weights not found at {p} - "
+        "provision with 'sudo scripts/fetch-models.sh'"
+    )
 
 
 _yolo_model = None
@@ -1307,7 +1571,7 @@ def _preprocess_openpose_locked(image):
 
     global _yolo_model
     if _yolo_model is None:
-        _download_yolo_pose()
+        _ensure_yolo_pose_local()
         from ultralytics import YOLO
 
         _log("Loading openpose preprocessor (yolov8n-pose) ...")
@@ -1335,29 +1599,64 @@ def _preprocess_openpose_locked(image):
 def _build_cn(slot, model_id: str):
     """Build the slot's own ControlNet img2img pipeline (independent of the
     slot's txt/i2i pipelines; lazily loaded per slot and per model id)."""
+    family = _model_family()
+    if not (family == "sdxl" or family.startswith("sd35")):
+        raise ValueError(f"ControlNet editing is not supported for the {family} model family")
     import torch
-    from diffusers import (AutoencoderKL, ControlNetModel,
-                           StableDiffusionXLControlNetImg2ImgPipeline as cn_cls)
+    from diffusers import ControlNetModel
 
     device = DEVICE if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
-    _check_model_id("ControlNet", model_id, "PICTURA_CONTROLNET_ALLOWLIST", DEFAULT_CONTROLNET_ALLOWLIST)
+    _check_model_id("ControlNet", model_id, None)
     _log(f"Loading ControlNet model {model_id} (slot {_slots.index(slot)}) ...")
-    cn_model = ControlNetModel.from_pretrained(
-        model_id, dtype=dtype, use_safetensors=True, cache_dir=CACHE_DIR, low_cpu_mem_usage=False
-    )
 
-    # SDXL ControlNet img2img with the fp16-safe VAE.
-    vae_kwargs = {
-        "vae": AutoencoderKL.from_pretrained(
-            "madebyollin/sdxl-vae-fp16-fix", dtype=dtype, low_cpu_mem_usage=False
+    if family == "sdxl":
+        from diffusers import AutoencoderKL
+        from diffusers import StableDiffusionXLControlNetImg2ImgPipeline as cn_cls
+
+        # SDXL ControlNet img2img with the fp16-safe VAE (family config).
+        auto_vae = _family_defaults().get("auto_vae")
+        if not auto_vae:
+            raise ValueError("model config: 'families.sdxl.auto_vae' is required for ControlNet")
+        vae_kwargs = {
+            "vae": AutoencoderKL.from_pretrained(
+                _local_dir(auto_vae), dtype=dtype, low_cpu_mem_usage=False
+            )
+        }
+        cn_model = ControlNetModel.from_pretrained(
+            _local_dir(model_id), dtype=dtype, use_safetensors=True, low_cpu_mem_usage=False
         )
-    }
+        pipe = cn_cls.from_pretrained(
+            _local_dir(_model_id()), controlnet=cn_model, dtype=dtype, low_cpu_mem_usage=False, **vae_kwargs
+        )
+    else:
+        from diffusers import StableDiffusion3ControlNetPipeline as cn_cls
+        from diffusers.models import SD3ControlNetModel
 
-    pipe = cn_cls.from_pretrained(
-        MODEL_ID, controlnet=cn_model, dtype=dtype, low_cpu_mem_usage=False, **vae_kwargs
-    )
+        cn_model = SD3ControlNetModel.from_pretrained(
+            _local_dir(model_id), dtype=dtype, use_safetensors=True, low_cpu_mem_usage=False
+        )
+        # Some repos ship fp32 biases alongside fp16 weights; normalize to the
+        # pipeline dtype to avoid 'Half input / float bias' runtime errors.
+        cn_model = cn_model.to(dtype=dtype)
+        attempts = [{"dtype": dtype, "variant": "fp16"}, {"dtype": dtype}, {}]
+        pipe = None
+        last_err = None
+        for attempt in attempts:
+            try:
+                pipe = cn_cls.from_pretrained(
+                    _local_dir(_model_id()), controlnet=cn_model, low_cpu_mem_usage=False, **attempt
+                )
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                _log("ControlNet build failed, retrying alternate precision/variant...")
+        if pipe is None:
+            raise ValueError(
+                f"{last_err}\n  not provisioned? run: sudo scripts/fetch-models.sh "
+                f"(models dir: {MODELS_ROOT})"
+            ) from last_err
     for fn in ("enable_attention_slicing", "enable_vae_slicing", "enable_vae_tiling"):
         try:
             getattr(pipe, fn)()
@@ -1369,7 +1668,8 @@ def _build_cn(slot, model_id: str):
     # Slot 0 keeps the old low-VRAM offload heuristic; extra slots exist only
     # when VRAM allows resident weights, but the CN pipe is heavier - fall
     # back to offload if it does not fit.
-    proactive = (_slots and slot is _slots[0]) and (W_DEFAULT >= 768 or H_DEFAULT >= 768)
+    _d = _family_defaults()
+    proactive = (_slots and slot is _slots[0]) and (_d["w"] >= 768 or _d["h"] >= 768)
     if device == "cuda" and (proactive or weights_gb > 0.8 * vram_gb):
         pipe.enable_model_cpu_offload()
     else:
@@ -1443,6 +1743,13 @@ def _image2image(
         control_img = control_img.resize((w, h), PILImage.LANCZOS)
         common["control_image"] = control_img
         common["controlnet_conditioning_scale"] = control_scale
+        if _model_family().startswith("sd35"):
+            # SD3 ships text-to-image ControlNet only: the source image drives
+            # the control map and the output size (strength is not applicable).
+            common.pop("image", None)
+            common.pop("strength", None)
+            common["width"] = w
+            common["height"] = h
     else:
         pipe = _ensure_i2i(slot)
         _apply_loras(pipe, lora_spec)
@@ -1587,12 +1894,13 @@ _IMG_FIELD_DESC_REMOTE = (
 
 
 def _build_server():
+    fd = _family_defaults()  # active family settings for descriptions below
     server = MCPServer(
         name="pictura",
         version="0.1.0",
-        title="Image Generation (SDXL)",
+        title=f"Image Generation ({_fd('desc')})",
         instructions=(
-            "Generate images with a local SDXL (Stable Diffusion XL) pipeline "
+            f"Generate images with a local {_fd('desc')} pipeline "
             "running on the host GPU. Over stdio the tool result is the image "
             "inline as base64 ImageContent (decode the data field if your "
             "client cannot render it); over http/sse the result note contains a "
@@ -1626,20 +1934,20 @@ def _build_server():
         ] = "",
         width: Annotated[
             int,
-            Field(description="Image width in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket (e.g. 1024x1024, 1152x896, 1344x768, 1536x640 and rotations)."),
-        ] = W_DEFAULT,
+            Field(description=f"Image width in px; 0 = family default ({_fd('desc')}: {_fd('w')}px). Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
+        ] = 0,
         height: Annotated[
             int,
-            Field(description="Image height in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket."),
-        ] = H_DEFAULT,
+            Field(description=f"Image height in px; 0 = family default ({_fd('desc')}: {_fd('h')}px). Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
+        ] = 0,
         num_inference_steps: Annotated[
             int,
-            Field(description="Denoising steps; clamped to 10..100 (typical 25-40 for SDXL)."),
-        ] = STEPS_DEFAULT,
+            Field(description=f"Denoising steps; 0 = family default ({_fd('desc')}: {_fd('steps')}), clamped to 10..100."),
+        ] = 0,
         guidance_scale: Annotated[
             float,
-            Field(description="How closely the image follows the prompt; range 1..15 (default 7.5)."),
-        ] = 7.5,
+            Field(description=f"How closely the image follows the prompt; 0 = family default ({_fd('desc')}: {_fd('guidance')}), range 1..15."),
+        ] = 0.0,
         seed: Annotated[
             int,
             Field(description="Seed for reproducibility; -1 = random. The reply note reports the actual seed used."),
@@ -1649,7 +1957,7 @@ def _build_server():
             Field(
                 description=(
                     "Apply LoRA adapter(s): comma-separated 'huggingface/org:weight' "
-                    "entries (weight defaults to 1.0). Only allowlisted ids work; "
+                    "entries (weight defaults to 1.0). Only supported ids work; "
                     "call list_loras to get valid ids. Example: 'nerijs/pixel-art-xl:0.8'"
                 ),
             ),
@@ -1660,7 +1968,7 @@ def _build_server():
         - prompt: what to draw (English works best; be specific).
         - negative_prompt: things to avoid (e.g. "blurry, low quality").
         - width/height: image size in pixels; any positive size is snapped to
-          the nearest SDXL ~1MP training bucket (multiple of 8, min 256,
+          the nearest native training bucket (multiple of 8, min 256,
           e.g. 1024x1024, 1152x896, 1344x768 and rotations) for best quality.
         - num_inference_steps: 25-40 typical.
         - guidance_scale: how closely to follow the prompt (1..15, ~7.5 default).
@@ -1670,8 +1978,11 @@ def _build_server():
         Note: the server never writes files; the image is returned inline and the
         client saves it where it wants (identical in local and remote modes).
         """
-        width, height = _snap_bucket(width, height)
-        steps = max(10, min(100, num_inference_steps))
+        d = _family_defaults()
+        width, height = _snap_bucket(width or d["w"], height or d["h"])
+        steps = max(10, min(100, num_inference_steps or d["steps"]))
+        if not guidance_scale:
+            guidance_scale = d["guidance"]
 
         import asyncio
 
@@ -1729,20 +2040,20 @@ def _build_server():
         ] = 0.6,
         width: Annotated[
             int,
-            Field(description="Target width in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket; 0 = keep the source size (also snapped)."),
+            Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
         ] = 0,
         height: Annotated[
             int,
-            Field(description="Target height in px; any positive value is accepted (rounded to a multiple of 8, min 256) and snapped to the nearest SDXL ~1MP training bucket; 0 = keep the source size (also snapped)."),
+            Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
         ] = 0,
         num_inference_steps: Annotated[
             int,
-            Field(description="Denoising steps; clamped to 10..100. Effective steps ≈ steps × strength."),
-        ] = 25,
+            Field(description=f"Denoising steps; 0 = family default ({_fd('desc')}: {_fd('steps')}), clamped to 10..100. Effective steps ≈ steps × strength."),
+        ] = 0,
         guidance_scale: Annotated[
             float,
-            Field(description="How closely the result follows the prompt; range 1..15 (default 7.5)."),
-        ] = 7.5,
+            Field(description=f"How closely the result follows the prompt; 0 = family default ({_fd('desc')}: {_fd('guidance')}), range 1..15."),
+        ] = 0.0,
         seed: Annotated[
             int,
             Field(description="Seed for reproducibility; -1 = random. The reply note reports the actual seed used."),
@@ -1752,7 +2063,7 @@ def _build_server():
             Field(
                 description=(
                     "Apply LoRA adapter(s): comma-separated 'huggingface/org:weight' "
-                    "entries (weight defaults to 1.0). Only allowlisted ids work; "
+                    "entries (weight defaults to 1.0). Only supported ids work; "
                     "call list_loras to get valid ids."
                 ),
             ),
@@ -1763,7 +2074,7 @@ def _build_server():
                 description=(
                     "ControlNet control type applied to the source image (abstract; "
                     "the server picks and hides the model). Currently supported: "
-                    + (", ".join(c for c, i in _CONTROL_TYPES.items() if i.get("supported")) or "-")
+                    + (", ".join(c for c in _control_types()) or "-")
                     + ". Do a live lookup via list_control_types (the set can change "
                     "server-side). Empty disables ControlNet."
                 ),
@@ -1781,7 +2092,10 @@ def _build_server():
         writes files - the client saves the returned image where it wants
         (identical in local and remote modes).
         """
-        steps = max(10, min(100, num_inference_steps))
+        d = _family_defaults()
+        steps = max(10, min(100, num_inference_steps or d["steps"]))
+        if not guidance_scale:
+            guidance_scale = d["guidance"]
         strength = max(0.01, min(1.0, strength))
         width = _edit_dim(width)
         height = _edit_dim(height)
@@ -1922,10 +2236,12 @@ def _build_server():
                 f"concurrency_slots={n_slots}",
                 f"load_seconds={info.get('load_seconds')}",
             ]
+        fam = _model_family()
+        _d = _family_defaults()
         lines += [
-            "size_policy=snap to SDXL ~1MP buckets (>=256, multiple of 8)",
-            f"snap_buckets={len(_SDXL_BUCKETS)} (SDXL ~1MP aspect-ratio buckets)",
-            f"native_size={W_DEFAULT}x{H_DEFAULT}",
+            "size_policy=snap to native buckets (>=256, multiple of 8)",
+            f"snap_buckets={len(_active_buckets())} ({fam} native aspect-ratio buckets)",
+            f"native_size={_d['w']}x{_d['h']} ({fam} default)",
         ]
         return "\n".join(lines)
 
@@ -1933,16 +2249,27 @@ def _build_server():
         name="list_loras",
         title="List LoRA ids",
         description=(
-            "Return the allowlisted LoRA ids valid for the 'lora' parameter of "
-            "generate_image / edit_image."
+            "Return the supported LoRA ids valid for the 'lora' parameter of "
+            "generate_image / edit_image, each with what it does (style / "
+            "trigger word / target family)."
         ),
     )
     async def list_loras() -> str:
-        lora_ids = _allowlist("PICTURA_LORA_ALLOWLIST", DEFAULT_LORA_ALLOWLIST)
-        shown = ", ".join(sorted(lora_ids)) if lora_ids else "(any 'org/repo' - allowlist disabled)"
+        lora_ids = _supported_loras()
+        meta = _lora_meta()
+        if lora_ids is None:
+            shown = "(any 'org/repo' - catalog disabled)"
+        elif lora_ids:
+            lines = []
+            for mid in sorted(lora_ids):
+                desc = meta.get(mid)
+                lines.append(f"  {mid}" + (f"  -  {desc}" if desc else ""))
+            shown = "\n".join(lines)
+        else:
+            shown = "(none configured)"
         return (
             "LoRA ids - pass to 'lora' as 'org/repo:weight' (weight defaults to 1.0):\n"
-            + "  " + shown
+            + shown
         )
 
     @server.tool(
@@ -1955,8 +2282,8 @@ def _build_server():
     )
     async def list_control_types() -> str:
         lines = []
-        for ctype, info in _CONTROL_TYPES.items():
-            note = info["desc"] if info.get("supported") else "(not supported yet)"
+        for ctype, info in _control_types().items():
+            note = info["desc"]
             lines.append(f"- {ctype}: {note}")
         return "Control types for edit_image 'control_type':\n" + "\n".join(lines)
 
@@ -1974,7 +2301,7 @@ def _smoke_test() -> int:
     logging.basicConfig(level=logging.INFO)
     smoke_dir = Path(__file__).resolve().parent.parent / "outputs"
     smoke_dir.mkdir(parents=True, exist_ok=True)
-    _log(f"Smoke test: model={MODEL_ID}, device={DEVICE}")
+    _log(f"Smoke test: model={_model_id()}, device={DEVICE}")
     try:
         with _slot_ctx() as slot:
             image, seed = _generate(
@@ -2024,12 +2351,12 @@ def _smoke_test() -> int:
                 pass
             else:
                 raise AssertionError(f"SSRF guard missed internal address {_bad}")
-        # SDXL bucket snapping sanity: exact buckets pass through, off-bucket
-        # sizes snap to the nearest official ~1MP bucket.
+        # Bucket snapping sanity: exact buckets pass through, off-bucket
+        # sizes snap to the nearest official native bucket.
         if _snap_bucket(1152, 896) != (1152, 896) or _snap_bucket(1024, 1024) != (1024, 1024):
-            raise AssertionError("exact SDXL buckets not preserved")
+            raise AssertionError("exact buckets not preserved")
         _snapped = _snap_bucket(512, 512)
-        if _snapped not in _SDXL_BUCKETS or max(_snapped) < 1024:
+        if _snapped not in _active_buckets() or max(_snapped) < 1024:
             raise AssertionError(f"off-bucket 512x512 snapped to {_snapped}")
         if _snap_bucket(1200, 900) != (1152, 896):
             raise AssertionError(f"4:3-ish request snapped to {_snap_bucket(1200, 900)}")
@@ -2100,10 +2427,11 @@ def main() -> int:  # noqa: C901
     # POST /images/upload bodies and external image fetches.
     global _MAX_BODY_BYTES
     _MAX_BODY_BYTES = args.max_body_mb * 1024 * 1024
-    if not IS_XL:
+    fam = _model_family()
+    if not (fam == "sdxl" or fam.startswith("sd35")):
         print(
-            f"[pictura-mcp] PICTURA_MODEL={MODEL_ID!r} is not an SDXL-family "
-            "checkpoint (model id must contain 'xl')",
+            f"[pictura-mcp] model {_model_id()!r} is not a supported "
+            "model family (supported: sdxl, sd35-medium, sd35-large)",
             file=sys.stderr,
             flush=True,
         )
@@ -2166,9 +2494,8 @@ def main() -> int:  # noqa: C901
         return _smoke_test()
 
     server = _build_server()
-    # Warm the model cache: pre-download allowlisted LoRA / ControlNet repos.
-    if not _env("PICTURA_SKIP_PREFETCH") == "1":
-        _prefetch_allowlisted()
+    # Model provisioning is a deployment step (scripts/fetch-models.sh): no
+    # startup/download-time HF access - all loads are local_files_only.
     try:
         if args.transport == "stdio":
             asyncio.run(server.run_stdio_async())
