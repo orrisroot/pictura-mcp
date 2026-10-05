@@ -608,14 +608,41 @@ def _fd(key):
 # The pool size is derived from measured free VRAM once the first model is
 # loaded: per extra slot the cost is a full weight set plus the activation
 # footprint of one job at the default resolution, and a fixed margin stays
-# free for decode spikes / other tenants. On a 32 GB V100 with SDXL fp16
-# (~7 GB weights) this yields 3 concurrent slots; on smaller cards it simply
-# degrades to 1 (= strictly serial).
+# free for decode spikes / other tenants. Bigger cards with smaller models
+# fit more slots; smaller cards simply degrade to 1 (= strictly serial).
+
+# The pool size is derived from measured free VRAM once the first model is
+# loaded: per extra slot the cost is a full weight set plus the activation
+# footprint of one job at the default resolution, and a fixed margin stays
+# free for decode spikes / other tenants. Bigger cards with smaller models
+# fit more slots; smaller cards simply degrade to 1 (= strictly serial).
 
 _SLOT_RESERVE_GB = 2.0        # VRAM margin that is never handed to extra slots
 _SLOT_ACT_BASE_GB = 1.5       # per-job activation floor (fp16)
 _SLOT_ACT_PER_MPX_GB = 1.2    # + per megapixel of the default resolution
-_SLOT_CAP = 3                 # safety cap in "auto" mode
+_SLOT_CAP_DEFAULT = 3         # safety cap in "auto" mode (no env mounted yet)
+
+
+def _slot_cap() -> int:
+    """Safety cap in \"auto\" mode, overridable via PICTURA_SLOT_CAP."""
+    raw = (_env("PICTURA_SLOT_CAP", "") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            _log(f"PICTURA_SLOT_CAP={raw!r} ignored (not an int); using default")
+    return _SLOT_CAP_DEFAULT
+
+
+def _multi_gpu_act_reserve() -> float:
+    """Per-card activation reserve (GiB) on the model-parallel path,
+    overridable via PICTURA_MULTI_GPU_RESERVE_GIB."""
+    raw = (_env("PICTURA_MULTI_GPU_RESERVE_GIB", "5") or "5").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        _log(f"PICTURA_MULTI_GPU_RESERVE_GIB={raw!r} ignored (not a float); using default")
+        return 5.0
 
 _slots: list = []             # slots in the pool (slot 0 first, built lazily)
 _BUILD_LOCK = threading.Lock()  # serialize pipeline construction (RAM / disk cache)
@@ -658,7 +685,7 @@ def _compute_slots(info: dict) -> int:
         act *= 2  # fp32 activations roughly double
     cost = max(0.1, info.get("weights_gb", 0) + act)  # extra slot: full weights
     extra = int((free_gb - _SLOT_RESERVE_GB) // cost)
-    n = max(1, min(_SLOT_CAP, 1 + extra))
+    n = max(1, min(_slot_cap(), 1 + extra))
     _log(
         f"slot sizing: free {free_gb:.1f} GB, per-slot ~{cost:.1f} GB "
         f"(weights {info.get('weights_gb', 0):.1f} + act {act:.1f}, "
@@ -741,29 +768,29 @@ def _build_txt(slot):
 
         pipe_cls = QwenImage21Pipeline
         # Multi-GPU model parallelism: when several CUDA devices are visible
-        # (PICTURA_CUDA_DEVICE=0,1) and the weights cannot fit on one card,
-        # accelerate's device_map="auto" shards the pipeline across GPUs so
-        # the weights stay fully GPU-resident (no CPU offload). V100/3090
-        # (24 GB) with Qwen (~32.4 GB weights) is exactly this case; a card
-        # that fits the weights keeps the plain single-device path.
+        # (PICTURA_CUDA_DEVICE=0,1) the diffusers device_map="balanced"
+        # dispatch spreads the pipeline components whole across the cards so
+        # the weights stay fully GPU-resident (no CPU offload). Cards whose
+        # VRAM fits the weights alone keep the plain single-device path.
         _n_gpu = len(os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")) \
             if os.environ.get("CUDA_VISIBLE_DEVICES") else torch.cuda.device_count()
         if _n_gpu > 1:
             model_kwargs["device_map"] = "balanced"  # diffusers-style dispatch: spread components whole over the visible GPUs
             model_kwargs["low_cpu_mem_usage"] = True  # required with a device_map
-            # Shape the dispatch with per-GPU memory caps: with plain
-            # "balanced" on 2×24 GB the splitter puts text_encoder (~17.5 GB)
-            # on GPU0 and transformer+VAE (~15.6 GB) on GPU1, which leaves the
-            # transformer card almost no activation headroom — the first
-            # img2img then OOMs in the VAE/attention paths. Capping GPU1 at
-            # ~14.5 GiB pushes the ~1.4 GB VAE to the sparse GPU0 while the
-            # ~14.2 GB transformer still fits there whole.
+            # Shape the dispatch with per-GPU memory caps so each card keeps
+            # some activation headroom: plain "balanced" packs each card to
+            # the brim and the first img2img then OOMs in the attention/VAE
+            # paths. The cap is per-card VRAM minus a reserve that leaves
+            # room for activations (KV cache, VAE decode spikes); the
+            # reserve defaults to 5 GiB per card and is tunable via
+            # PICTURA_MULTI_GPU_RESERVE_GB (bigger cards should still get
+            # proportionally sized caps; cards that fit the weights alone
+            # keep the plain single-device+offload path).
             _raw_cap = int(torch.cuda.get_device_properties(0).total_memory / 1e9)
-            # text_encoder alone is ~17.5 GB; transformer+VAE ~15.6 GB.
-            # GPU0 gets the text encoder (~3-4 GiB free after), GPU1 the
-            # transformer + VAE (~4 GiB free after) — leaving room for the
-            # activations that the cpu-offload hooks then route correctly.
-            model_kwargs["max_memory"] = {0: f"{_raw_cap - 5}GiB", 1: f"{_raw_cap - 5}GiB"}
+            _reserve = _multi_gpu_act_reserve()
+            model_kwargs["max_memory"] = {
+                i: f"{max(1, _raw_cap - _reserve):.0f}GiB" for i in range(_n_gpu)
+            }
             _log(f"multi-GPU visible ({_n_gpu} devices) -> device_map=balanced "
                  f"(model-parallel; caps {model_kwargs['max_memory']})")
     elif family.startswith("sd35"):

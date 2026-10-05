@@ -258,6 +258,9 @@ python server/pictura_server.py [options]
 | `PICTURA_CUDA_DEVICE` | unset | restrict CUDA GPU(s) (`0`, `0,1`) → `CUDA_VISIBLE_DEVICES` |
 | `PICTURA_MODELS_DIR` | `<project>/models` | root of the standard local model layout |
 | `PICTURA_MAX_CONCURRENT` | `auto` | render slot pool size: integer pins it, `1` = strictly serial, `auto` = sized from free VRAM |
+| `PICTURA_MULTI_GPU_RESERVE_GIB` | `5` | per-GPU activation reserve (GiB) when loading model-parallel: per-card cap = total VRAM − reserve |
+| `PICTURA_SLOT_CAP` | `3` | safety cap for auto-sized slot pool (integer; ignored when `PICTURA_MAX_CONCURRENT` is pinned) |
+| `PICTURA_SLOT_CAP` | `3` | safety cap for the auto-sized slot pool (ignored when `PICTURA_MAX_CONCURRENT` is an integer) |
 | `PICTURA_PUBLIC_URL` | unset | required for non-loopback http/sse binds; externally visible base (scheme + host + path prefix) |
 | `PICTURA_IMAGE_CACHE_TTL` | `600` | seconds an image download URL stays valid |
 | `PICTURA_IMAGE_CACHE_MAX` | `64` | max images kept in the in-memory URL cache |
