@@ -31,7 +31,9 @@ MCP client ──────────────────▶ pictura_ser
   a slot pool; the pool size is derived from measured free VRAM (per extra
   slot: another full weight set + activation footprint + reserve; capped;
   `PICTURA_MAX_CONCURRENT` overrides). Each slot owns independent pipeline
-  instances so LoRA/offload/scheduler state never races.
+  instances so LoRA/offload/scheduler state never races. Qwen-Image 2.1
+  with multiple visible CUDA devices loads model-parallel
+  (`device_map=balanced`, weights stay on GPU, no CPU offload).
 - **Tools never accept a path**: the save location is not controllable
   through the MCP interface.
 

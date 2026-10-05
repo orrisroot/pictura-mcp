@@ -40,7 +40,11 @@ Images are **never written to the server disk** (stateless):
 
 **Concurrency**: rendering runs on a pool of **slots** (independent pipeline
 instances per slot, so LoRA/offload state never races). Pool size is derived
-from measured free VRAM; override with `PICTURA_MAX_CONCURRENT`.
+from measured free VRAM; override with `PICTURA_MAX_CONCURRENT`. With
+several CUDA devices visible (`PICTURA_CUDA_DEVICE=0,1`), the Qwen-Image 2.1
+pipeline is loaded model-parallel across the cards instead of one card +
+CPU offload; set `PICTURA_MAX_CONCURRENT=2` to run two independent slots
+(one per GPU-pair, best for throughput).
 
 ## Setup
 
