@@ -75,6 +75,20 @@ while IFS=$'\t' read -r kind rid; do
         fi
         continue
       fi
+      # Viggle turbo (few-step distilled Qwen adapter): fetch only the r256
+      # LoRA file and the scheduler config - the repo also carries quantized
+      # merged transformers, older LoRA versions and ComfyUI assets that the
+      # server does not use.
+      if [ "$rid" = "Viggle/Qwen-Image-2.1-viggle-turbo" ]; then
+        if [ -s "$dest/Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r256.safetensors" ] && [ -s "$dest/scheduler/scheduler_config.json" ]; then
+          echo "[fetch-models] already local (skip): $rid -> $dest"
+          continue
+        fi
+        echo "[fetch-models] downloading turbo adapter + scheduler: $rid"
+        mkdir -p "$dest"
+        "$HF" download "$rid" "Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r256.safetensors" "scheduler/scheduler_config.json" --local-dir "$dest"
+        continue
+      fi
       if [ -f "$dest/model_index.json" ] || [ -n "$(find "$dest" -maxdepth 1 -name '*.safetensors' -print -quit 2>/dev/null)" ]; then
         echo "[fetch-models] already local (skip): $rid -> $dest"
         continue
@@ -118,9 +132,15 @@ if v:
 elif vae:
     add("vae", vae)
 # Auto-VAEs declared per family in the config (e.g. SDXL fp16-safe VAE).
+# Turbo entries (few-step distilled adapters, e.g. Viggle) contribute a LoRA
+# id and a scheduler repo, both provisioned like any other weight.
 for fam_cfg in (cfg.get("families") or {}).values():
     if isinstance(fam_cfg, dict):
         add("vae", fam_cfg.get("auto_vae"))
+        turbo = fam_cfg.get("turbo") or {}
+        if isinstance(turbo, dict):
+            add("lora", turbo.get("lora"))
+            add("scheduler", turbo.get("scheduler"))
 loras = cfg.get("supported_loras") or {}
 if isinstance(loras, dict):
     lora_ids = list(loras.keys())

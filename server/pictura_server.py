@@ -573,7 +573,7 @@ def _sd35_variant_from_index() -> str:
 # only knows how to find them - no per-family constants.
 def _family_defaults() -> dict:
     """Generation settings of the active family (steps/guidance/size/desc/
-    auto_vae) from config['families'][<family id>]."""
+    auto_vae/turbo) from config['families'][<family id>]."""
     fam = _model_family()
     fam_cfg = (_model_config().get("families") or {}).get(fam) or {}
     if not fam_cfg:
@@ -585,6 +585,7 @@ def _family_defaults() -> dict:
         "w": int(fam_cfg.get("width", 1024)),
         "h": int(fam_cfg.get("height", 1024)),
         "auto_vae": fam_cfg.get("auto_vae"),
+        "turbo": fam_cfg.get("turbo") or None,
     }
 
 def _fd(key):
@@ -788,6 +789,33 @@ def _build_txt(slot):
         ) from last_err
     slot.txt = pipe
 
+    # Turbo mode (few-step distilled adapters, e.g. Viggle Qwen-Image-2.1):
+    # the distilled model requires its own FlowMatchEulerDiscreteScheduler
+    # config (the shipped one has shift_terminal: null - the base config's
+    # 0.02 wrecks the last step) and explicit raw sigmas on every call.
+    _turbo = _family_defaults().get("turbo") or {}
+    if _turbo.get("scheduler"):
+        from diffusers import FlowMatchEulerDiscreteScheduler
+
+        _sched_dir = _local_dir(_turbo["scheduler"])
+        # Accept either '<dir>' (scheduler_config.json at its root) or a
+        # '<dir>/scheduler' subfolder layout (as provisioned from the Viggle
+        # repo, whose scheduler config lives in a subfolder).
+        if not os.path.isfile(os.path.join(_sched_dir, "scheduler_config.json")):
+            sub = os.path.join(_sched_dir, "scheduler")
+            if os.path.isfile(os.path.join(sub, "scheduler_config.json")):
+                _sched_dir = sub
+            else:
+                raise ValueError(
+                    f"turbo scheduler {_turbo['scheduler']!r}: no "
+                    f"scheduler_config.json under {_sched_dir} - run: "
+                    f"sudo scripts/fetch-models.sh (models dir: {MODELS_ROOT})"
+                )
+        pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            _sched_dir, local_files_only=True
+        )
+        _log("turbo scheduler swapped in (distilled few-step schedule)")
+
     # ---- memory optimizations for low-VRAM cards -----------------------------
     try:
         pipe.enable_attention_slicing()
@@ -939,15 +967,33 @@ def _generate(
         # (default 1.0 = no guidance); the negative prompt only applies when
         # true_cfg_scale > 1, so an empty default is passed as None to avoid
         # the pipeline's "CFG not enabled" warning on ordinary generations.
-        common = dict(
-            prompt=prompt,
-            negative_prompt=negative_prompt or None,
-            true_cfg_scale=guidance,
-            width=width,
-            height=height,
-            num_inference_steps=steps,
-            generator=generator,
-        )
+        _turbo = _family_defaults().get("turbo") or {}
+        if _turbo.get("lora"):
+            # Few-step distilled turbo: the adapter is required on every call
+            # (unmerged, scale 1.0, from the server-side config whitelist-
+            # exempt) and the explicit sigma schedule from the config must be
+            # passed raw. No CFG, no negative prompt.
+            _apply_turbo_lora(pipe)
+            common = dict(
+                prompt=prompt,
+                negative_prompt=None,
+                true_cfg_scale=1.0,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                sigmas=list(_turbo["sigmas"]),
+                generator=generator,
+            )
+        else:
+            common = dict(
+                prompt=prompt,
+                negative_prompt=negative_prompt or None,
+                true_cfg_scale=guidance,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                generator=generator,
+            )
     else:
         common = dict(
             prompt=prompt,
@@ -1447,6 +1493,32 @@ def _maybe_convert_kohya_sd3_lora(mid: str):
     return converted
 
 
+def _apply_turbo_lora(pipe) -> None:
+    """Apply the family's turbo adapter (few-step distilled LoRA) at scale 1.0.
+
+    The turbo id comes from the server-side model config, not from the
+    client, so it bypasses the supported_loras whitelist validation that
+    client-supplied LoRAs go through.
+    """
+    turbo = (_family_defaults().get("turbo") or {}).get("lora")
+    if not turbo:
+        return
+    lora_path = _lora_weight_file(_local_dir(turbo))
+    if not lora_path:
+        raise ValueError(
+            f"turbo LoRA {turbo!r}: no .safetensors found under {_local_dir(turbo)} - "
+            "not provisioned? run: sudo scripts/fetch-models.sh"
+        )
+    with _LORA_LOCK:
+        _log("turbo: applying distilled LoRA (scale 1.0)")
+        pipe.load_lora_weights(
+            lora_path,
+            adapter_name="turbo",
+            use_safetensors=True,
+            low_cpu_mem_usage=False,
+        )
+
+
 def _apply_loras(pipe, spec: str) -> None:
     """Load/apply (or clear) LoRA adapters on a pipeline.
 
@@ -1478,8 +1550,13 @@ def _apply_loras(pipe, spec: str) -> None:
                 if lora_state is not None:
                     pipe.load_lora_weights(lora_state, adapter_name=name)
                 else:
+                    lora_path = _lora_weight_file(_local_dir(mid))
+                    if not lora_path:
+                        raise ValueError(
+                            f"no .safetensors LoRA weights found under {_local_dir(mid)}"
+                        )
                     pipe.load_lora_weights(
-                        _local_dir(mid),
+                        lora_path,
                         adapter_name=name,
                         use_safetensors=True,
                         low_cpu_mem_usage=False,
@@ -1777,20 +1854,32 @@ def _image2image(
                 "ControlNet editing is not supported for the qwen-image-2.1 family"
             )
         pipe = _ensure_i2i(slot)
-        _apply_loras(pipe, lora_spec)
         # `strength` does not apply: the full step count runs on the unified
         # pipeline. Progress reporting matches the real step count.
         eff_steps = steps
+        _turbo = _family_defaults().get("turbo") or {}
+        if _turbo.get("lora"):
+            # Turbo runs the shared text/reference K/V extraction once, so a
+            # second adapter would double the cost for little gain — the
+            # distilled turbo is applied on its own, at scale 1.0, and any
+            # client LoRA spec is dropped.
+            _apply_turbo_lora(pipe)
+            _cfg, _neg, _sigmas = 1.0, None, list(_turbo["sigmas"])
+        else:
+            _apply_loras(pipe, lora_spec)
+            _cfg, _neg, _sigmas = guidance, negative_prompt, None
         kw = dict(
             prompt=prompt,
             image=[source],
-            negative_prompt=negative_prompt or None,
-            true_cfg_scale=guidance,
+            negative_prompt=_neg or None,
+            true_cfg_scale=_cfg,
             num_inference_steps=steps,
             generator=generator,
             callback_on_step_end=_cb,
             callback_on_step_end_tensor_inputs=[],
         )
+        if _sigmas is not None:
+            kw["sigmas"] = _sigmas
         if width:
             kw["width"] = w
         if height:

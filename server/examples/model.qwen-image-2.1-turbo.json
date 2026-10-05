@@ -1,0 +1,34 @@
+{
+  "model": "Qwen/Qwen-Image-2.1",
+  "vae": null,
+  "families": {
+    "qwen-image-2.1": {
+      "desc": "Qwen-Image 2.1 Viggle Turbo",
+      "steps": 6,
+      "guidance": 1.0,
+      "width": 1024,
+      "height": 1024,
+      "auto_vae": null,
+      "turbo": {
+        "lora": "Viggle/Qwen-Image-2.1-viggle-turbo",
+        "sigmas": [1.0, 0.9375, 0.875, 0.75, 0.5, 0.25],
+        "scheduler": "Viggle/Qwen-Image-2.1-viggle-turbo"
+      },
+      "buckets": [
+        [1024, 1024],
+        [1280, 960],
+        [960, 1280],
+        [1344, 896],
+        [896, 1344],
+        [1408, 768],
+        [768, 1408],
+        [1536, 896],
+        [896, 1536]
+      ]
+    }
+  },
+  "supported_loras": {
+    "abenzerps/qwen-image-2.1-uncensored-lora": "uncensored / no content-filter (Qwen-Image 2.1; requires manual file placement, see README)"
+  },
+  "control_types": {}
+}
