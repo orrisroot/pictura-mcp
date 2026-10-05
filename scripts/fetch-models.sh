@@ -52,6 +52,21 @@ while IFS=$'\t' read -r kind rid; do
       org="${rid%%/*}"
       repo="${rid##*/}"
       dest="$MODELS_DIR/$org/$repo"
+      # The Qwen-Image 2.1 uncensored LoRA lives as a single file inside the
+      # abenzerps/Qwen-Image-2.1-Uncensored-GGUF repo (no standalone HF repo of
+      # the config id); fetch that one file, cached after the first run.
+      if [ "$rid" = "abenzerps/qwen-image-2.1-uncensored-lora" ]; then
+        file="$dest/qwen-image-2.1-uncensored-lora.safetensors"
+        if [ -s "$file" ]; then
+          echo "[fetch-models] already local (skip): $rid -> $file"
+          continue
+        fi
+        echo "[fetch-models] downloading lora: abenzerps/Qwen-Image-2.1-Uncensored-GGUF"
+        mkdir -p "$dest"
+        curl -fsSL "https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF/resolve/main/qwen-image-2.1-uncensored-lora.safetensors" -o "$file" \
+          || { echo "[fetch-models] error: failed to fetch $rid (not a standalone repo; see README)" >&2; exit 1; }
+        continue
+      fi
       if [ -f "$dest/model_index.json" ] || [ -n "$(find "$dest" -maxdepth 1 -name '*.safetensors' -print -quit 2>/dev/null)" ]; then
         echo "[fetch-models] already local (skip): $rid -> $dest"
         continue

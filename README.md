@@ -348,12 +348,16 @@ Manually, one by one (`hf` ships in the project venv):
     # Qwen-Image 2.1 (7B transformer + 8B text encoder + VAE, ~31 GB bf16)
     ./.venv/bin/hf download Qwen/Qwen-Image-2.1 --local-dir models/Qwen/Qwen-Image-2.1
     # LoRA / ControlNet / preprocessors -> the same plain-dir layout
-    ./.venv/bin/hf download abenzerps/qwen-image-2.1-uncensored-lora --local-dir models/abenzerps/qwen-image-2.1-uncensored-lora
     ./.venv/bin/hf download prithivMLmods/SD3.5-Large-Photorealistic-LoRA --local-dir models/prithivMLmods/SD3.5-Large-Photorealistic-LoRA
     ./.venv/bin/hf download diffusers-internal-dev/sd35-controlnet-depth-8b --local-dir models/diffusers-internal-dev/sd35-controlnet-depth-8b
     ./.venv/bin/hf download Intel/dpt-hybrid-midas --local-dir models/Intel/dpt-hybrid-midas
     # openpose preprocessor (not an HF repo):
     curl -fsSL https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-pose.pt -o models/yolov8n-pose.pt
+    # Qwen-Image 2.1 uncensored LoRA (a single file in the GGUF repo, not a
+    # standalone HF repo); place it manually where the config id points:
+    mkdir -p models/abenzerps/qwen-image-2.1-uncensored-lora
+    curl -fsSL https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF/resolve/main/qwen-image-2.1-uncensored-lora.safetensors \
+      -o models/abenzerps/qwen-image-2.1-uncensored-lora/qwen-image-2.1-uncensored-lora.safetensors
 
 Layout:
 

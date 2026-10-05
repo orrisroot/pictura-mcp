@@ -528,7 +528,10 @@ def _model_family() -> str:
             import json as _json
 
             with open(idx, "r", encoding="utf-8") as fh:
-                klass = (_json.load(fh).get("config", {}).get("diffusers", {}).get("_class_name") or "")
+                loaded = _json.load(fh)
+            klass = loaded.get("_class_name") or (
+                loaded.get("config", {}).get("diffusers", {}).get("_class_name") or ""
+            )
         except Exception:  # noqa: BLE001
             klass = ""
         if "QwenImage21" in klass:
@@ -2419,13 +2422,20 @@ def _smoke_test() -> int:
                 raise AssertionError(f"SSRF guard missed internal address {_bad}")
         # Bucket snapping sanity: exact buckets pass through, off-bucket
         # sizes snap to the nearest official native bucket.
-        if _snap_bucket(1152, 896) != (1152, 896) or _snap_bucket(1024, 1024) != (1024, 1024):
-            raise AssertionError("exact buckets not preserved")
+        d = _family_defaults()
+        _ab = _active_buckets()
+        if (1024, 1024) not in _ab or _snap_bucket(1024, 1024) != (1024, 1024):
+            raise AssertionError("exact 1024x1024 bucket not preserved")
+        _any_non_square = next(((w, h) for (w, h) in _ab if w != h), None)
+        if _any_non_square is not None and _snap_bucket(*_any_non_square) != _any_non_square:
+            raise AssertionError(f"exact bucket {_any_non_square} not preserved")
+        # Any off-bucket request, whatever the aspect, must land on a bucket.
+        for _off in ((512, 512), (1200, 900), (777, 777)):
+            if _snap_bucket(*_off) not in _ab:
+                raise AssertionError(f"off-bucket {_off} snapped outside the bucket set")
         _snapped = _snap_bucket(512, 512)
-        if _snapped not in _active_buckets() or max(_snapped) < 1024:
-            raise AssertionError(f"off-bucket 512x512 snapped to {_snapped}")
-        if _snap_bucket(1200, 900) != (1152, 896):
-            raise AssertionError(f"4:3-ish request snapped to {_snap_bucket(1200, 900)}")
+        if max(_snapped) < min(d["w"], d["h"]):
+            raise AssertionError(f"off-bucket 512x512 snapped too small: {_snapped}")
         try:
             with _slot_ctx() as slot:
                 edited, seed2, _ = _image2image(
