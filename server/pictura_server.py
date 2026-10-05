@@ -740,6 +740,32 @@ def _build_txt(slot):
         from diffusers import QwenImage21Pipeline
 
         pipe_cls = QwenImage21Pipeline
+        # Multi-GPU model parallelism: when several CUDA devices are visible
+        # (PICTURA_CUDA_DEVICE=0,1) and the weights cannot fit on one card,
+        # accelerate's device_map="auto" shards the pipeline across GPUs so
+        # the weights stay fully GPU-resident (no CPU offload). V100/3090
+        # (24 GB) with Qwen (~32.4 GB weights) is exactly this case; a card
+        # that fits the weights keeps the plain single-device path.
+        _n_gpu = len(os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")) \
+            if os.environ.get("CUDA_VISIBLE_DEVICES") else torch.cuda.device_count()
+        if _n_gpu > 1:
+            model_kwargs["device_map"] = "balanced"  # diffusers-style dispatch: spread components whole over the visible GPUs
+            model_kwargs["low_cpu_mem_usage"] = True  # required with a device_map
+            # Shape the dispatch with per-GPU memory caps: with plain
+            # "balanced" on 2×24 GB the splitter puts text_encoder (~17.5 GB)
+            # on GPU0 and transformer+VAE (~15.6 GB) on GPU1, which leaves the
+            # transformer card almost no activation headroom — the first
+            # img2img then OOMs in the VAE/attention paths. Capping GPU1 at
+            # ~14.5 GiB pushes the ~1.4 GB VAE to the sparse GPU0 while the
+            # ~14.2 GB transformer still fits there whole.
+            _raw_cap = int(torch.cuda.get_device_properties(0).total_memory / 1e9)
+            # text_encoder alone is ~17.5 GB; transformer+VAE ~15.6 GB.
+            # GPU0 gets the text encoder (~3-4 GiB free after), GPU1 the
+            # transformer + VAE (~4 GiB free after) — leaving room for the
+            # activations that the cpu-offload hooks then route correctly.
+            model_kwargs["max_memory"] = {0: f"{_raw_cap - 5}GiB", 1: f"{_raw_cap - 5}GiB"}
+            _log(f"multi-GPU visible ({_n_gpu} devices) -> device_map=balanced "
+                 f"(model-parallel; caps {model_kwargs['max_memory']})")
     elif family.startswith("sd35"):
         from diffusers import StableDiffusion3Pipeline
 
@@ -763,6 +789,9 @@ def _build_txt(slot):
     pipe = None
     last_err = None
     model_dir = _local_dir(_model_id())
+    # device_map dispatch requires low_cpu_mem_usage=True (meta-device init);
+    # that flag is already inside model_kwargs on the model-parallel path, so
+    # the plain-path calls below pass low_cpu_mem_usage=False positionally and
     for attempt in attempts:
         try:
             if _vae_id() and family == "sdxl":
@@ -775,12 +804,17 @@ def _build_txt(slot):
                     model_dir, vae=vae, low_cpu_mem_usage=False, **attempt
                 )
             else:
-                pipe = pipe_cls.from_pretrained(
-                    model_dir, low_cpu_mem_usage=False, **attempt
-                )
+                # Pipeline-level load. On a multi-GPU visible host the
+                # device_map=balanced dispatch splits the components across
+                # cards (text_encoder on one, transformer+VAE on the other),
+                # and the cpu-offload hooks applied in the next step wire the
+                # execution device so latents and prompt embeds are created
+                # where the transformer runs.
+                pipe = pipe_cls.from_pretrained(model_dir, **attempt)
             break
         except Exception as e:  # noqa: BLE001
             last_err = e
+            _log(f"Initial load attempt failed: {type(e).__name__}: {e}")
             _log("Initial load failed, retrying with alternate precision/variant...")
     if pipe is None:
         raise ValueError(
@@ -823,10 +857,21 @@ def _build_txt(slot):
         _log(f"attention slicing skipped: {e}")
     try:
         pipe.enable_vae_slicing()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     try:
         pipe.enable_vae_tiling()
+    except Exception:
+        pass
+    # AutoencoderKLQwenImage21 does not expose the pipeline wrappers; enable
+    # slicing/tiling directly on the VAE so large encode/decode spikes stay
+    # small in VRAM on the (often tightly packed) model-parallel card.
+    try:
+        getattr(pipe.vae, "enable_slicing")()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        getattr(pipe.vae, "enable_tiling")()
     except Exception:  # noqa: BLE001
         pass
 
@@ -862,7 +907,13 @@ def _build_txt(slot):
     offloaded = False
     weights_gb = 0.0
     vram_gb = 0.0
-    if device == "cuda":
+    # Model-parallel (device_map) pipelines are sharded across GPUs and must
+    # never be re-placed: enable_model_cpu_offload() and .to(device) would
+    # both break the dispatch. Detected either on the pipeline itself or on
+    # any component that carries its own dispatch (the manual multi-GPU load
+    # sharding below leaves the pipe-level map unset).
+    _model_parallel = isinstance(getattr(pipe, "hf_device_map", None), dict)
+    if device == "cuda" and not _model_parallel:
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
         weights_gb = _estimate_weights_bytes(pipe) / 1e9
         # SDXL in fp16 OOMs around ~768px+ with weights resident on low-VRAM
@@ -886,7 +937,13 @@ def _build_txt(slot):
             _log(f"weights {weights_gb:.1f} GB fit in VRAM {vram_gb:.1f} GB -> keeping on GPU")
             pipe.to(device)
     else:
-        pipe.to(device)
+        # Pipeline-level device_map dispatch: the sharding wires the
+        # execution device itself. CPU offload hooks can't be re-applied on
+        # a mapped pipeline, and the mapped layout keeps every weight on a
+        # GPU, so nothing more is needed here.
+        weights_gb = _estimate_weights_bytes(pipe) / 1e9
+        _log(f"model-parallel pipeline ready (device_map dispatch, no offload; "
+             f"exec device {pipe._execution_device})")
 
     pipe.safety_checker = None
     try:
@@ -1338,9 +1395,17 @@ def _i2i_dims(source_w: int, source_h: int, width: int, height: int):
 
 
 def _oom_retry(pipe, **kwargs):
-    """Call the pipeline; on CUDA OOM, spill weights to CPU and retry once."""
+    """Call the pipeline; on CUDA OOM, spill weights to CPU and retry once.
+
+    Model-parallel pipelines (device_map sharded across GPUs) are skipped:
+    offloading would destroy the dispatch, and a multi-GPU pipeline running
+    OOM means the activations themselves overflowed — retrying identical
+    work on a broken dispatch cannot succeed.
+    """
     import torch
 
+    if isinstance(getattr(pipe, "hf_device_map", None), dict):
+        return pipe(**kwargs)
     try:
         return pipe(**kwargs)
     except torch.cuda.OutOfMemoryError:
@@ -1498,10 +1563,22 @@ def _apply_turbo_lora(pipe) -> None:
 
     The turbo id comes from the server-side model config, not from the
     client, so it bypasses the supported_loras whitelist validation that
-    client-supplied LoRAs go through.
+    client-supplied LoRAs go through. Idempotent: applying twice is a no-op
+    (the txt and img2img code paths share one pipeline in the Qwen family,
+    so both paths try to attach the same adapter).
     """
     turbo = (_family_defaults().get("turbo") or {}).get("lora")
     if not turbo:
+        return
+    # The turbo adapter attaches on the transformer; both the txt and the
+    # shared img2img code path call this, so re-applying on an already
+    # attached pipeline must be a no-op (the loader raises on a duplicate
+    # adapter name otherwise).
+    try:
+        active = set(pipe.get_active_adapters() or [])
+    except Exception:  # noqa: BLE001 - older mixin versions
+        active = set(getattr(pipe, "active_adapters", []) or [])
+    if "turbo" in active:
         return
     lora_path = _lora_weight_file(_local_dir(turbo))
     if not lora_path:
@@ -1517,6 +1594,26 @@ def _apply_turbo_lora(pipe) -> None:
             use_safetensors=True,
             low_cpu_mem_usage=False,
         )
+        # A hand-sharded pipeline has no pipe-level dispatch: the loader
+        # materializes the adapter on the default device (cuda:0), while the
+        # transformer (and with it the LoRA layers fused into its modules)
+        # runs on its own GPU. Move any transformer parameter that ended up
+        # on the wrong device — the LoRA tensors are the ones that do.
+        _tr = getattr(pipe, "transformer", None)
+        _tr_dev = getattr(_tr, "hf_device_map", None) or {}
+        _want_idx = None
+        for _v in _tr_dev.values():
+            _want_idx = _v
+            break
+        if _want_idx is not None:
+            _want = f"cuda:{_want_idx}" if isinstance(_want_idx, int) else str(_want_idx)
+            _moved = 0
+            for _p in _tr.parameters():
+                if _p.device.type == "cuda" and f"cuda:{_p.device.index}" != _want:
+                    _p.data = _p.data.to(_want)
+                    _moved += 1
+            if _moved:
+                _log(f"turbo: moved {_moved} adapter parameter tensor(s) to {_want}")
 
 
 def _apply_loras(pipe, spec: str) -> None:
@@ -1878,6 +1975,15 @@ def _image2image(
             callback_on_step_end=_cb,
             callback_on_step_end_tensor_inputs=[],
         )
+        _tr_map = getattr(getattr(pipe, "transformer", None), "hf_device_map", None)
+        _tr_devices = (set(_tr_map.values()) if isinstance(_tr_map, dict) else set())
+        if len(_tr_devices) > 1:
+            # Model-parallel sharding of the transformer across cards: the
+            # KV cache would be pinned to the transformer's cards and,
+            # together with the reference-image latents, overflow them.
+            # Disable the cache on this path (a small step-time cost, not a
+            # quality one).
+            kw["use_kv_cache"] = False
         if _sigmas is not None:
             kw["sigmas"] = _sigmas
         if width:
