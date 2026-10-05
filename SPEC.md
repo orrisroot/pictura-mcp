@@ -391,3 +391,13 @@ outputs/                         # created by: server/pictura_server.py --smoke
 ```
 Steps: README (§Setup). Git tracking policy (.gitignore) is not part of this
 spec.
+
+### VAE decode slicing / tiling (opt-in)
+
+Set `PICTURA_VAE_SLICING=1` / `PICTURA_VAE_TILING=1` to enable VAE decode
+slicing / tiling. They save VRAM during decode on small-VRAM cards, **but**
+the tiled path leaves faint periodic color bands in the output (diffusers'
+own docs note "tile-sized changes in the output"). Qwen-Image 2.1 decodes a
+1024² image in ~1.4 GiB VRAM without tiling, so keep it off there — the
+bands appear as vertical streaks on smooth shapes (their spacing follows
+`tile_sample_stride` × `spatial_compression_ratio`).

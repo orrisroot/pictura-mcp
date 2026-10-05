@@ -882,25 +882,33 @@ def _build_txt(slot):
         pipe.enable_attention_slicing()
     except Exception as e:  # noqa: BLE001
         _log(f"attention slicing skipped: {e}")
-    try:
-        pipe.enable_vae_slicing()
-    except Exception:
-        pass
-    try:
-        pipe.enable_vae_tiling()
-    except Exception:
-        pass
-    # AutoencoderKLQwenImage21 does not expose the pipeline wrappers; enable
-    # slicing/tiling directly on the VAE so large encode/decode spikes stay
-    # small in VRAM on the (often tightly packed) model-parallel card.
-    try:
-        getattr(pipe.vae, "enable_slicing")()
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        getattr(pipe.vae, "enable_tiling")()
-    except Exception:  # noqa: BLE001
-        pass
+    # VAE slicing/tiling: opt-in only. The Qwen-Image 2.1 VAE tiles its
+    # decode when enabled and the tiled path leaves faint periodic color
+    # bands in the output (diffusers' own docstring warns about "tile-sized
+    # changes in the output"); they are visible as vertical purple streaks
+    # on smooth white areas. Enable it only when the deployment opts in via
+    # PICTURA_VAE_TILING — needed on small-VRAM cards where a full-size
+    # decode would OOM, safe to disable everywhere else.
+    if _env("PICTURA_VAE_SLICING", "0") == "1":
+        try:
+            pipe.enable_vae_slicing()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            getattr(pipe.vae, "enable_slicing")()
+        except Exception:
+            pass
+        _log("VAE slicing enabled (PICTURA_VAE_SLICING=1)")
+    if _env("PICTURA_VAE_TILING", "0") == "1":
+        try:
+            pipe.enable_vae_tiling()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            getattr(pipe.vae, "enable_tiling")()
+        except Exception:
+            pass
+        _log("VAE tiling enabled (PICTURA_VAE_TILING=1)")
 
     # ---- fp16 VAE NaN / black-image guard for SDXL ---------------------------
     # Done BEFORE device placement so the swapped VAE is included by the
@@ -1067,6 +1075,12 @@ def _generate(
                 num_inference_steps=steps,
                 sigmas=list(_turbo["sigmas"]),
                 generator=generator,
+                # KV-cached decode tiles differently from the prefill (see
+                # the pipeline docs) — with bf16 activations the layout
+                # rounding shows up as faint banding artifacts in the
+                # output. Disable the cache for artifact-free images; the
+                # step-time cost is small at the turbo step count.
+                use_kv_cache=False,
             )
         else:
             common = dict(
@@ -1127,8 +1141,10 @@ def _build_i2i(slot):
     except Exception:  # noqa: BLE001
         pass
     try:
-        slot.i2i.enable_vae_slicing()
-        slot.i2i.enable_vae_tiling()
+        if _env("PICTURA_VAE_SLICING", "0") == "1":
+            slot.i2i.enable_vae_slicing()
+        if _env("PICTURA_VAE_TILING", "0") == "1":
+            slot.i2i.enable_vae_tiling()
     except Exception:  # noqa: BLE001
         pass
     _log("img2img pipeline ready (slot-local, shared weights)")
@@ -1902,10 +1918,21 @@ def _build_cn(slot, model_id: str):
                 f"{last_err}\n  not provisioned? run: sudo scripts/fetch-models.sh "
                 f"(models dir: {MODELS_ROOT})"
             ) from last_err
-    for fn in ("enable_attention_slicing", "enable_vae_slicing", "enable_vae_tiling"):
+    # Attention slicing is harmless; VAE slicing/tiling are opt-in (see
+    # _build_txt — the Qwen VAE's tiled decode leaves periodic color bands).
+    try:
+        pipe.enable_attention_slicing()
+    except Exception as e:  # noqa: BLE001
+        _log(f"attention slicing skipped: {e}")
+    if _env("PICTURA_VAE_SLICING", "0") == "1":
         try:
-            getattr(pipe, fn)()
-        except Exception:  # noqa: BLE001
+            pipe.enable_vae_slicing()
+        except Exception:
+            pass
+    if _env("PICTURA_VAE_TILING", "0") == "1":
+        try:
+            pipe.enable_vae_tiling()
+        except Exception:
             pass
 
     weights_gb = _estimate_weights_bytes(pipe) / 1e9
