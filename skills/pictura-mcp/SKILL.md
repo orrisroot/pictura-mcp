@@ -30,7 +30,7 @@ as `mcp__generate_image`). The canonical names are:
 | `edit_image` | image → image (edit) |
 | `upload_image` | local file → one-time upload reservation (http/sse; stdio: use local path) |
 | `list_loras` | valid LoRA ids for the `lora` parameter |
-| `list_control_types` | valid abstract ControlNet types for `control_type` |
+| `list_control_types` | valid abstract ControlNet types for `control_type` (only present for families with ControlNet) |
 | `server_status` | model + image-size policy (stdio adds device / VRAM etc.) |
 
 ## Saving images (important)
@@ -55,8 +55,10 @@ image is available (inline / at the URL) but not yet stored.
 ## Verify before you use
 
 When unsure which LoRA/ControlNet values are valid, **call the discovery tools**
-first (`list_loras`, `list_control_types`) — only supported ids are accepted,
-and arbitrary URLs or file paths are rejected.
+first (`list_loras`, and `list_control_types` when it is offered) — only
+supported ids are accepted, and arbitrary URLs or file paths are rejected. If
+the active family has no ControlNet support, `list_control_types` is not
+offered and `edit_image` has no `control_type` parameter — do not pass one.
 
 ## generate_image
 
@@ -79,16 +81,21 @@ edit_image(
   prompt,                       # required
   image,                        # required: http(s) URL, or file path (stdio/local)
   negative_prompt = "",
-  strength = 0.6,               # 0..1; higher = bigger change
+  strength = 0.6,               # 0..1; higher = bigger change (SDXL/SD3.5)
   width = 0, height = 0,        # 0 = keep source size; else snapped to a native bucket
   num_inference_steps = 0,      # 0 = model-family default
-  guidance_scale = 0,           # 0 = model-family default
+  guidance_scale = 0,           # 0 = model-family default (Qwen: >1 + negative = CFG)
   seed = -1,
   lora = "",
-  control_type = "",            # e.g. "canny"; abstract, discover via list_control_types
-  control_scale = 1.0           # ~0.4-1.0
+  control_type = "",            # e.g. "canny"; ONLY exists for families with ControlNet
+  control_scale = 1.0           # ~0.4-1.0 (same condition as control_type)
 )
 ```
+
+> For families without ControlNet (e.g. `qwen-image-2.1`) the schema has no
+> `control_type`/`control_scale` at all — do not pass them. For Qwen-Image
+> 2.1, `strength` is also ignored: the unified pipeline runs the full step
+> count on the source-conditioned edit.
 
 **`image` — how to point at the source image:**
 
@@ -112,10 +119,11 @@ edit_image(
 
 The tool schema shows which forms apply to the current run.
 
-`control_type` preprocesses the source image internally (e.g. canny/depth/pose)
-and steers the edit; the valid types and their backing models are configured in
-`server/model.json` (`control_types`) — call `list_control_types` for the
-current set.
+When it exists, `control_type` preprocesses the source image internally
+(e.g. canny/depth/pose) and steers the edit; the valid types and their backing
+models are configured in `server/model.json` (`control_types`) — call
+`list_control_types` for the current set. When the tool is absent, the active
+family has no ControlNet support and `edit_image` accepts no `control_type`.
 
 ## Prompting conventions
 

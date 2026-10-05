@@ -22,7 +22,7 @@ MCP client ──────────────────▶ pictura_ser
 | `edit_image` | image → image (img2img / edit from a prompt) |
 | `upload_image` | local file → upload reservation (one-time token + POST URL; http/sse; stdio: pass the path to `edit_image`) |
 | `list_loras` | supported LoRA ids with descriptions (for `lora`) |
-| `list_control_types` | abstract ControlNet types (for `control_type`) |
+| `list_control_types` | abstract ControlNet types (for `control_type`); **not registered for families without `control_types`** in the config |
 | `server_status` | model + image-size policy (stdio adds device / VRAM etc.) |
 
 Both generation tools accept optional **LoRA** adapters, and `edit_image`
@@ -427,7 +427,8 @@ target family). Example:
 lora = "prithivMLmods/SD3.5-Large-Photorealistic-LoRA:0.8"
 ```
 
-**ControlNet** (`edit_image` only): pass `control_type` — an abstract type
+**ControlNet** (`edit_image` only, families with `control_types` configured):
+pass `control_type` — an abstract type
 applied to the source image (see `list_control_types`). The server runs the
 preprocessor in-memory and picks/hides the backing model; `control_scale`
 (0.4–1.0) tunes the strength. Example:
@@ -436,6 +437,15 @@ preprocessor in-memory and picks/hides the backing model; `control_scale`
 control_type = "canny"   # auto-extract edges from the source, then ControlNet
 control_scale = 0.9
 ```
+
+**Families without ControlNet hide the knobs entirely.** When the active
+`model.json` has no `control_types` entries (e.g. the `qwen-image-2.1` preset,
+whose pipeline does image-conditioned editing without ControlNet),
+`edit_image` is registered **without** the `control_type`/`control_scale`
+parameters and the `list_control_types` tool is **not registered at all** —
+as far as an MCP client can tell, those knobs do not exist for that
+deployment. Adding a `control_types` entry to the config re-exposes them
+(unchanged tool names, so clients just see the parameters reappear).
 
 Requires the `peft` dependency (listed in `server/requirements.txt`).
 
@@ -448,7 +458,9 @@ Requires the `peft` dependency (listed in `server/requirements.txt`).
 - **ControlNet ids are server-side and hidden** — clients only choose an
   abstract `control_type`; backing model and preprocessor are configured in
   `control_types`. ControlNet is **not supported for the `qwen-image-2.1`
-  family** (the unified pipeline does image-conditioned editing without it).
+  family** (the unified pipeline does image-conditioned editing without it):
+  there its parameters and the `list_control_types` tool are hidden entirely
+  (see above).
 - All weights are **plain local dirs** provisioned by `scripts/fetch-models.sh`
   — no downloads at startup or at tool-call time; a missing model raises a
   provisioning error.

@@ -77,8 +77,8 @@ Edits an existing image with a prompt (img2img).
 | `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5 / Qwen 1.0) | mapped to `true_cfg_scale` for Qwen-Image 2.1 |
 | `seed` | int | -1 | -1 = random |
 | `lora` | string | `""` | optional LoRA adapters, `'huggingface/repo:weight,...'` |
-| `control_type` | string | `""` | optional abstract ControlNet type applied to the source (`canny`, `depth`, `openpose`); server hides the model; empty = disabled. **Not supported for `qwen-image-2.1`** |
-| `control_scale` | float | 1.0 | ControlNet conditioning strength (~0.4–1.0) |
+| `control_type` | string | `""` | optional abstract ControlNet type applied to the source (`canny`, `depth`, `openpose`); server hides the model; empty = disabled. Only **exposed to clients when the config has `control_types`**; a family without ControlNet (e.g. `qwen-image-2.1`) does not accept this parameter at all — the schema omits it and the corresponding model id stays server-side |
+| `control_scale` | float | 1.0 | ControlNet conditioning strength (~0.4–1.0); exposed under the same condition as `control_type` |
 
 ### `upload_image`
 | Param | Type | Default | Description |
@@ -100,6 +100,9 @@ Returns the supported LoRA ids valid for the `lora` parameter.
 ### `list_control_types`
 Returns the abstract ControlNet types valid for `control_type`, with short
 guidance. **No model identifiers are exposed** (they stay server-side).
+Registered **only when the active config has `control_types`** — a family
+without ControlNet (e.g. `qwen-image-2.1`) does not expose this tool, and
+`edit_image`'s schema omits the ControlNet parameters there.
 
 ### `server_status`
 Reports `model` and the image-size policy (`size_policy`, `snap_buckets`,
@@ -177,7 +180,10 @@ LoRA ids are restricted to `supported_loras` in the config (`["*"]` = any id);
 ControlNet is exposed as abstract `control_type`s (`canny` / `depth` /
 `openpose`, in-memory preprocessed server-side); the backing model and
 preprocessor weights are configured server-side in `control_types` and are
-**not exposed to clients**.
+**not exposed to clients**. A config with an **empty** `control_types` map
+(e.g. `qwen-image-2.1`) exposes no ControlNet at all: `edit_image` is
+registered without the `control_type` / `control_scale` parameters and the
+`list_control_types` tool is not registered.
 
 ### Downloads (manual, before first start)
 - URLs and local paths are always rejected for client-supplied ids; weights
