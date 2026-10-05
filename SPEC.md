@@ -195,7 +195,7 @@ python server/pictura_server.py [options]
 |---|---|---|
 | `--transport stdio\|http\|sse` | `stdio` | MCP transport |
 | `--host` | `127.0.0.1` | bind address (use `0.0.0.0` for remote) |
-| `--port` | `8000` | TCP port |
+| `--port` | `8001` | TCP port |
 | `--api-key <key>` | — | **required for http/sse**; clients send it via the `PICTURA_API_KEY` header |
 | `--max-body-mb <n>` | 16 | max HTTP request body (http/sse); bounds image uploads and external image fetches |
 | `--log-file <path>` | stderr | append `[pictura-mcp]` logs to a file (also `$PICTURA_LOG_FILE`) |
@@ -263,7 +263,7 @@ python server/pictura_server.py [options]
 | `PICTURA_IMAGE_CACHE_MAX` | `64` | max images kept in the in-memory URL cache |
 | `PICTURA_IMAGE_CACHE_MAX_MB` | `512` | max total bytes of the URL cache |
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
-| `PICTURA_PORT` | `8000` | TCP port for http/sse (CLI `--port` overrides) |
+| `PICTURA_PORT` | `8001` | TCP port for http/sse (CLI `--port` overrides) |
 | `PICTURA_IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse; bounds image uploads and external image fetches |
 | `PICTURA_IMAGE_UPLOAD_TICKET_TTL` | `120` | upload ticket TTL (seconds) from `upload_image` |
 | `PICTURA_API_KEY` | unset | API key; clients send it in the `PICTURA_API_KEY` header; fallback when `--api-key` not given |
@@ -312,7 +312,7 @@ client stores server definitions in the same shape:
 {
   "mcpServers": {
     "pictura": {
-      "url": "http://<HOST>:8000/mcp",
+      "url": "http://<HOST>:8001/mcp",
       "headers": { "PICTURA_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000
     }

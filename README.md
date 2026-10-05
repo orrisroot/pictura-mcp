@@ -120,7 +120,7 @@ cp deploy/mcp.json.example .mcp.json   # then replace <PROJECT_ROOT>
 ./.venv/bin/python server/pictura_server.py \
   --transport http \
   --host 0.0.0.0 \
-  --port 8000 \
+  --port 8001 \
   --api-key my-secret-key
 ```
 
@@ -140,7 +140,7 @@ Remote client config (`deploy/mcp.remote.json.example`):
 {
   "mcpServers": {
     "pictura": {
-      "url": "http://<SERVER_HOST_OR_IP>:8000/mcp",
+      "url": "http://<SERVER_HOST_OR_IP>:8001/mcp",
       "headers": { "PICTURA_API_KEY": "<TOKEN>" },
       "requestTimeoutMs": 600000,
       "toolPrefix": ""
@@ -155,7 +155,7 @@ Prerequisite: Setup steps 1–3 (`.venv`, `server/model.json`, weights). The
 installer registers the unit but does not start it:
 
 ```bash
-sudo deploy/install-systemd.sh /absolute/path/to/repo pictura-mcp 8000
+sudo deploy/install-systemd.sh /absolute/path/to/repo pictura-mcp 8001
 ```
 
 - `deploy/pictura-mcp.env` is created from the template with an
