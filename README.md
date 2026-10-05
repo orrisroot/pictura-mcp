@@ -199,13 +199,29 @@ preset from `server/examples/` or point `PICTURA_MODEL_CONFIG` at it):
 - `vae` — optional custom VAE id (`null` = auto)
 - `families.<id>` — per-family settings: `desc`, `steps`, `guidance`,
   `width`/`height`, `buckets` (native resolutions; rotations are added
-  automatically), `auto_vae`
+  automatically), `auto_vae`, and optionally `turbo`
 - `supported_loras` — id → description map (client-usable LoRAs; `*` = any id)
 - `control_types` — `pre` / `model` / `prep_model` per abstract type
   (`canny` / `depth` / `openpose`); ids hidden from clients
 
 The server refuses to start when the configured model is not a supported
 family (exit 2).
+
+**Turbo mode** (`families.<id>.turbo`) enables a few-step distilled adapter
+(preset `model.qwen-image-2.1-turbo.json`, the Viggle Qwen-Image-2.1 turbo):
+generations drop from 40 to **6 steps (~5× faster)** with quality close to
+the base model. When the `turbo` block is set:
+
+- the distilled LoRA (`lora`) is applied automatically at scale 1.0 on every
+  generate/edit call — client `lora` parameters are ignored;
+- generations run with the adapter's raw sigma schedule (`sigmas`), no CFG
+  and no negative prompt (`guidance_scale` / `negative_prompt` ignored);
+- the distilled scheduler config (`scheduler`, `shift_terminal: null`) is
+  substituted at pipeline build time;
+- `steps` in the family config becomes the turbo step count (6).
+
+Provisioning pulls only the r256 LoRA and the scheduler config from the
+Viggle repo (`scripts/fetch-models.sh` handles it via the `turbo` config).
 
 **Model provisioning** is a deployment step — the server never contacts
 Hugging Face; every weight is a plain local directory under
@@ -247,6 +263,7 @@ Defaults per model family:
 | SDXL | 1024×1024 | 30 | 7.0 |
 | SD3.5 Medium/Large | 1024×1024 | 40 | 4.5 |
 | Qwen-Image 2.1 | 1024×1024 | 40 | 1.0 (no CFG; `>1` + negative prompt enables CFG) |
+| Qwen-Image 2.1 (Viggle Turbo) | 1024×1024 | 6 | 1.0 fixed (no CFG, no negative prompt; raw sigma schedule) |
 
 Requested sizes snap to the nearest native training bucket of the active
 model (SDXL ~1MP; SD3.5 up to ~2MP; Qwen-Image 2.1 up to ~2.1MP) — off-bucket
