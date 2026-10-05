@@ -114,6 +114,7 @@ The tool schema shows which forms apply to the current run.
 | `sdxl` | ✓ | ✓ | ✓ | ✓ (canny/depth/openpose) | 1024², 30 steps, guidance 7.0 |
 | `sd35-medium` / `sd35-large` | ✓ | ✓ | ✓ | ✓ (canny/depth) | 1024², 40 steps, guidance 4.5 |
 | `qwen-image-2.1` | ✓ | ✓ (unified pipeline) | ✓ | — | 1024², 40 steps, guidance 1.0 (pass `>1` + negative prompt for CFG) |
+| `qwen-image-2.1` turbo | ✓ | ✓ (unified pipeline) | enforced | — | 1024², **6 steps** (~5× faster), CFG off. The distilled LoRA is applied automatically; schema descriptions still show the full parameter list, but `guidance_scale` / `negative_prompt` / `lora` have no effect |
 
 Unsupported families are rejected at startup.
 

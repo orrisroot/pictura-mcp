@@ -133,6 +133,7 @@ model raises a provisioning error. SDXL families use the configured
 | `sdxl` | 1024×1024 | 30 | 7.0 |
 | `sd35-medium` / `sd35-large` | 1024×1024 | 40 | 4.5 |
 | `qwen-image-2.1` | 1024×1024 | 40 | 1.0 (no CFG; `>1` + negative prompt enables CFG) |
+| `qwen-image-2.1` + turbo (Viggle) | 1024×1024 | 6 | 1.0 fixed (no CFG; raw sigma schedule; `guidance_scale` / `negative_prompt` / client `lora` ignored) |
 
 Requested sizes snap to the family's native training buckets (`buckets` in
 the config), so output stays on the aspect/area combinations the model was
