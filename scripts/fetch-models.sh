@@ -63,8 +63,16 @@ while IFS=$'\t' read -r kind rid; do
         fi
         echo "[fetch-models] downloading lora: abenzerps/Qwen-Image-2.1-Uncensored-GGUF"
         mkdir -p "$dest"
-        curl -fsSL "https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF/resolve/main/qwen-image-2.1-uncensored-lora.safetensors" -o "$file" \
-          || { echo "[fetch-models] error: failed to fetch $rid (not a standalone repo; see README)" >&2; exit 1; }
+        # Download to a temp file and move into place, so an interrupted
+        # transfer never leaves a truncated safetensors that the next run
+        # would treat as provisioned.
+        if curl -fsSL "https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF/resolve/main/qwen-image-2.1-uncensored-lora.safetensors" -o "$file.part"; then
+          mv "$file.part" "$file"
+        else
+          rm -f "$file.part"
+          echo "[fetch-models] error: failed to fetch $rid (not a standalone repo; see README)" >&2
+          exit 1
+        fi
         continue
       fi
       if [ -f "$dest/model_index.json" ] || [ -n "$(find "$dest" -maxdepth 1 -name '*.safetensors' -print -quit 2>/dev/null)" ]; then

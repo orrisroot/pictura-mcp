@@ -81,7 +81,7 @@ edit_image(
   prompt,                       # required
   image,                        # required: http(s) URL, or file path (stdio/local)
   negative_prompt = "",
-  strength = 0.6,               # 0..1; higher = bigger change (SDXL/SD3.5)
+  strength = 0.6,               # 0..1; higher = bigger change (SDXL/SD3.5; not a Qwen param)
   width = 0, height = 0,        # 0 = keep source size; else snapped to a native bucket
   num_inference_steps = 0,      # 0 = model-family default
   guidance_scale = 0,           # 0 = model-family default (Qwen: >1 + negative = CFG)
@@ -92,9 +92,9 @@ edit_image(
 )
 ```
 
-> For families without ControlNet (e.g. `qwen-image-2.1`) the schema has no
-> `control_type`/`control_scale` at all — do not pass them. For Qwen-Image
-> 2.1, `strength` is also ignored: the unified pipeline runs the full step
+> For the `qwen-image-2.1` family (no ControlNet, no strength):
+> `edit_image`'s schema omits `control_type`, `control_scale` **and `strength`**
+> entirely — do not pass them. The unified pipeline always runs the full step
 > count on the source-conditioned edit.
 
 **`image` — how to point at the source image:**

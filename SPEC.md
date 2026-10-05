@@ -56,7 +56,7 @@ Text-to-image.
 |---|---|---|---|
 | `prompt` | string | — | required |
 | `negative_prompt` | string | `""` | only used when CFG is active (Qwen-Image 2.1: `guidance_scale > 1`) |
-| `width` | int | 0 = family default | any positive value is snapped to the nearest native training bucket of the active model (SDXL ~1MP / SD3.5 up to ~2MP / Qwen-Image 2.1 up to ~2.1MP, multiple of 32; min 256, multiple of 8) |
+| `width` | int | 0 = family default | any positive value is snapped to the nearest native training bucket of the active model (SDXL ~1MP / SD3.5 up to ~2MP / Qwen-Image 2.1 up to ~2.1MP; buckets are multiples of 32, so positive requests floor onto a 32-multiple axis; min 256, multiple of 8) |
 | `height` | int | 0 = family default | any positive value is snapped to the nearest native training bucket |
 | `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40 / Qwen 40) | clamped to [10, 100] |
 | `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5 / Qwen 1.0) | mapped to `true_cfg_scale` for Qwen-Image 2.1 |
@@ -71,8 +71,8 @@ Edits an existing image with a prompt (img2img).
 | `prompt` | string | — | required |
 | `image` | string | — | required. Source image: an `http(s)://` URL — a server image URL (`http://<host>/images/<id>` from `generate_image` / `edit_image` / `POST /images/upload`, resolved from the in-memory cache) or an external image URL (fetched server-side, SSRF-guarded). On a local stdio run a host file path / `file://` URI is also accepted; over http/sse the server reads no host files |
 | `negative_prompt` | string | `""` | only used when CFG is active (Qwen-Image 2.1: `guidance_scale > 1`) |
-| `strength` | float | 0.6 | 0..1, higher = more change (not used by Qwen-Image 2.1, which edits on the unified pipeline) |
-| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value is snapped to the nearest native training bucket of the active model (min 256, multiple of 8; Qwen-Image 2.1 keeps the source aspect and derives size from `output_resolution`) |
+| `strength` | float | 0.6 | 0..1, higher = more change; **omitted from the `qwen-image-2.1` schema** (that family's edit always runs the full step count) |
+| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value is snapped to the nearest native training bucket of the active model (min 256, multiple of 8). Qwen-Image 2.1: the source is resized to the snapped pair first, then the unified pipeline derives the output from that aspect (sizes land on multiple-of-32 dims) |
 | `num_inference_steps` | int | 0 = family default (SDXL 30 / SD3.5 40 / Qwen 40) | effective steps ≈ `steps × strength` |
 | `guidance_scale` | float | 0 = family default (SDXL 7.0 / SD3.5 4.5 / Qwen 1.0) | mapped to `true_cfg_scale` for Qwen-Image 2.1 |
 | `seed` | int | -1 | -1 = random |

@@ -7,10 +7,13 @@
 # torch away from the working sm_70 build.
 torch>=2.9,<3.0
 # Qwen-Image 2.1 (diffusers.QwenImage21Pipeline) is not in a PyPI release yet
-# (merged to git main via huggingface/diffusers#14804 on 2026-09-20). Pin the
-# git main build so QwenImage21Pipeline is importable; switch back to a PyPI
-# release (e.g. `diffusers>=0.41,<1.0`) once Qwen-Image 2.1 ships there.
-diffusers @ git+https://github.com/huggingface/diffusers.git@main
+# (merged to git main via huggingface/diffusers#14804 on 2026-09-20). Pinned to
+# the commit verified in production (0.41.0.dev0; QwenImage21Pipeline +
+# torch 2.7/2.9 compatible). Floating @main would let any future commit change
+# prod behavior - and a later main requiring torch>=2.9 would silently upgrade
+# torch away from the V100 sm_70 build via requirements-v100.txt. Re-pin by
+# resolving the newest main commit and smoke-testing before commit.
+diffusers @ git+https://github.com/huggingface/diffusers.git@8b33bfc04b6b5e8bb58a58e55f68746c1bbee4cd#egg=diffusers
 transformers>=5.17,<6.0
 accelerate>=1.15,<2.0
 safetensors>=0.8,<1.0

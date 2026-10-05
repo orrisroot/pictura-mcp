@@ -391,7 +391,9 @@ offload; CUDA-OOM at runtime also auto-offloads and retries.
   To edit a local image against a remote server, call the `upload_image`
   tool first and POST the bytes with the returned `X-UPLOAD-TOKEN` (see
   **Uploading source images** above) to get a server image URL.
-- **`strength`** (0..1, default 0.6): higher = larger change
+- **`strength`** (0..1, default 0.6): higher = larger change. **Not accepted on
+  `qwen-image-2.1`** (the schema omits it): the unified pipeline always runs
+  the full step count on the source-conditioned edit.
 - **`width`/`height`** (0 = keep source size; any value is snapped to the
   nearest native training bucket of the active model — including 0, so the
   output aspect can differ slightly from a non-bucket source)

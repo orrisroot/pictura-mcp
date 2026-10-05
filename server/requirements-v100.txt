@@ -16,7 +16,11 @@ torch==2.7.1+cu126
 torchvision==0.22.1+cu126
 torchaudio==2.7.1+cu126
 # Qwen-Image 2.1 needs diffusers git main until it ships in a PyPI release.
-diffusers @ git+https://github.com/huggingface/diffusers.git@main
+# Pinned to the commit verified in production (0.41.0.dev0) - see the fuller
+# comment in requirements.txt. Do NOT let a refresh float back to @main: a
+# future main requiring torch>=2.9 would upgrade torch away from the sm_70
+# build this file exists to protect.
+diffusers @ git+https://github.com/huggingface/diffusers.git@8b33bfc04b6b5e8bb58a58e55f68746c1bbee4cd#egg=diffusers
 transformers>=5.17,<6.0
 accelerate>=1.15,<2.0
 safetensors>=0.8,<1.0

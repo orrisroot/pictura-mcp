@@ -752,7 +752,13 @@ def _build_txt(slot):
     attempts = [dict(model_kwargs)]
     if dtype == torch.float16:
         attempts.insert(0, {**model_kwargs, "variant": "fp16"})
-    attempts.append({})
+    # A final no-dtype attempt means fp32: harmless for SDXL/SD3.5 (~10-20 GB),
+    # but Qwen (~33 GB bf16) loaded in fp32 is a ~65 GB materialization with
+    # low_cpu_mem_usage=False - on a small host a clean load error becomes swap
+    # death. The bf16 load IS the correct precision for the Qwen checkpoint,
+    # so a failed bf16 load is a provisioning problem, not a precision one.
+    if family != "qwen-image-2.1":
+        attempts.append({})
     pipe = None
     last_err = None
     model_dir = _local_dir(_model_id())
@@ -2125,7 +2131,12 @@ def _build_server():
         import asyncio
 
         loop = asyncio.get_running_loop()
-        eff_steps = int(steps * strength)
+        # Qwen-Image 2.1 ignores `strength` (the unified pipeline runs the full
+        # step count), so advertise the real step count as the progress total
+        # instead of steps × strength.
+        eff_steps = (
+            steps if _model_family() == "qwen-image-2.1" else int(steps * strength)
+        )
 
         def on_step(step: int):
             if ctx is not None:
@@ -2172,16 +2183,18 @@ def _build_server():
         return _image_result(data, name, actual_seed, elapsed, kind="edited image", base=_request_base(ctx))
 
     # edit_image is registered exactly once; the schema differs by family:
-    # a config WITH 'control_types' exposes control_type/control_scale, a
-    # config WITHOUT them (e.g. qwen-image-2.1, whose pipeline has no
-    # ControlNet support) omits the knobs entirely - as far as MCP clients
-    # can tell, those parameters simply do not exist for this deployment.
+    # a config WITH 'control_types' exposes control_type/control_scale; a
+    # config WITHOUT them (e.g. qwen-image-2.1, whose unified pipeline has
+    # no ControlNet and no strength knob) omits those three parameters
+    # entirely - as far as MCP clients can tell, they do not exist for this
+    # deployment.
     _edit_tool_kwargs = dict(
         name="edit_image",
         title="Edit Image (img2img)",
         description=_EDIT_IMAGE_DESC_LOCAL if _ALLOW_HOST_PATHS else _EDIT_IMAGE_DESC_REMOTE,
     )
-    if _controlnet_available():
+    _QWEN_EDIT = _model_family() == "qwen-image-2.1"
+    if _controlnet_available() and not _QWEN_EDIT:
 
         @server.tool(**_edit_tool_kwargs)
         async def edit_image(
@@ -2287,10 +2300,6 @@ def _build_server():
                 str,
                 Field(description="Things to avoid, e.g. 'blurry, low quality'."),
             ] = "",
-            strength: Annotated[
-                float,
-                Field(description="0..1: how strongly to transform (higher = more change). Default 0.6; clamped to 0.01..1.0."),
-            ] = 0.6,
             width: Annotated[
                 int,
                 Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
@@ -2301,7 +2310,7 @@ def _build_server():
             ] = 0,
             num_inference_steps: Annotated[
                 int,
-                Field(description=f"Denoising steps; 0 = family default ({_fd('desc')}: {_fd('steps')}), clamped to 10..100. Effective steps ≈ steps × strength."),
+                Field(description=f"Denoising steps; 0 = family default ({_fd('desc')}: {_fd('steps')}), clamped to 10..100. The full step count runs on the source-conditioned edit."),
             ] = 0,
             guidance_scale: Annotated[
                 float,
@@ -2331,7 +2340,7 @@ def _build_server():
                 prompt,
                 image,
                 negative_prompt,
-                strength,
+                1.0,  # strength: not offered for this family (full-step edit)
                 width,
                 height,
                 num_inference_steps,
@@ -2466,10 +2475,11 @@ def _build_server():
             + shown
         )
 
-    if _controlnet_available():
+    if _controlnet_available() and not _QWEN_EDIT:
         # Only expose the ControlNet discovery tool when the active config
-        # actually has control types; otherwise the tool would just report an
-        # empty set and advertise a knob that edit_image does not even accept.
+        # actually has control types (and the family supports them at all);
+        # otherwise the tool would just report an empty set and advertise a
+        # knob that edit_image does not even accept.
         @server.tool(
             name="list_control_types",
             title="List ControlNet Types",
@@ -2553,8 +2563,11 @@ def _smoke_test() -> int:
         # sizes snap to the nearest official native bucket.
         d = _family_defaults()
         _ab = _active_buckets()
-        if (1024, 1024) not in _ab or _snap_bucket(1024, 1024) != (1024, 1024):
-            raise AssertionError("exact 1024x1024 bucket not preserved")
+        _smallest_square = min(
+            ((w, h) for (w, h) in _ab if w == h), key=lambda b: b[0] * b[1], default=None
+        )
+        if _smallest_square is None or _snap_bucket(*_smallest_square) != _smallest_square:
+            raise AssertionError("exact smallest-square bucket not preserved")
         _any_non_square = next(((w, h) for (w, h) in _ab if w != h), None)
         if _any_non_square is not None and _snap_bucket(*_any_non_square) != _any_non_square:
             raise AssertionError(f"exact bucket {_any_non_square} not preserved")
