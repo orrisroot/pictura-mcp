@@ -42,7 +42,11 @@ echo "==> every server tool appears in the docs"
 "$PY" - <<'EOF'
 import re
 src = open("server/pictura_server.py").read()
-tools = sorted(set(re.findall(r'@server\.tool\(\s*name="([a-z_]+)"', src)))
+# Names passed directly, or collected into a kwargs dict that carries a
+# name="..." literal (e.g. _edit_tool_kwargs = dict(name="edit_image", ...)).
+tools = set(re.findall(r'@server\.tool\(\s*name="([a-z_]+)"', src))
+tools |= set(re.findall(r'dict\(\s*name="([a-z_]+)"', src))
+tools = sorted(tools)
 docs = open("README.md").read() + open("SPEC.md").read() + open("skills/pictura-mcp/SKILL.md").read()
 missing = [t for t in tools if t not in docs]
 assert not missing, f"tool(s) missing from docs: {missing}"

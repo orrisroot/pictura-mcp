@@ -1962,6 +1962,18 @@ _IMG_FIELD_DESC_REMOTE = (
 )
 
 
+def _controlnet_available() -> bool:
+    """Whether the active model config exposes any ControlNet types.
+
+    When the config has no 'control_types' entries (e.g. the qwen-image-2.1
+    preset, whose pipeline has no ControlNet support), edit_image hides its
+    control_type / control_scale parameters and list_control_types is not
+    registered at all: a family that cannot steer with ControlNet should not
+    advertise the knobs to clients.
+    """
+    return bool(_control_types())
+
+
 def _build_server():
     fd = _family_defaults()  # active family settings for descriptions below
     server = MCPServer(
@@ -2085,82 +2097,23 @@ def _build_server():
         data, _b64, elapsed, name = _finalize_result(image, actual_seed, t0, prefix="img")
         return _image_result(data, name, actual_seed, elapsed, kind="image", base=_request_base(ctx))
 
-    @server.tool(
-        name="edit_image",
-        title="Edit Image (img2img)",
-        description=_EDIT_IMAGE_DESC_LOCAL if _ALLOW_HOST_PATHS else _EDIT_IMAGE_DESC_REMOTE,
-    )
-    async def edit_image(
-        prompt: Annotated[
-            str,
-            Field(description="How to transform the image. English works best; be specific."),
-        ],
-        image: Annotated[
-            str,
-            Field(description=_IMG_FIELD_DESC_LOCAL if _ALLOW_HOST_PATHS else _IMG_FIELD_DESC_REMOTE),
-        ],
-        negative_prompt: Annotated[
-            str,
-            Field(description="Things to avoid, e.g. 'blurry, low quality'."),
-        ] = "",
-        strength: Annotated[
-            float,
-            Field(description="0..1: how strongly to transform (higher = more change). Default 0.6; clamped to 0.01..1.0."),
-        ] = 0.6,
-        width: Annotated[
-            int,
-            Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
-        ] = 0,
-        height: Annotated[
-            int,
-            Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
-        ] = 0,
-        num_inference_steps: Annotated[
-            int,
-            Field(description=f"Denoising steps; 0 = family default ({_fd('desc')}: {_fd('steps')}), clamped to 10..100. Effective steps ≈ steps × strength."),
-        ] = 0,
-        guidance_scale: Annotated[
-            float,
-            Field(description=f"How closely the result follows the prompt; 0 = family default ({_fd('desc')}: {_fd('guidance')}), range 1..15."),
-        ] = 0.0,
-        seed: Annotated[
-            int,
-            Field(description="Seed for reproducibility; -1 = random. The reply note reports the actual seed used."),
-        ] = -1,
-        lora: Annotated[
-            str,
-            Field(
-                description=(
-                    "Apply LoRA adapter(s): comma-separated 'huggingface/org:weight' "
-                    "entries (weight defaults to 1.0). Only supported ids work; "
-                    "call list_loras to get valid ids."
-                ),
-            ),
-        ] = "",
-        control_type: Annotated[
-            str,
-            Field(
-                description=(
-                    "ControlNet control type applied to the source image (abstract; "
-                    "the server picks and hides the model). Currently supported: "
-                    + (", ".join(c for c in _control_types()) or "-")
-                    + ". Do a live lookup via list_control_types (the set can change "
-                    "server-side). Empty disables ControlNet."
-                ),
-            ),
-        ] = "",
-        control_scale: Annotated[
-            float,
-            Field(
-                description="ControlNet conditioning strength, typical range 0.4-1.0 (default 1.0).",
-            ),
-        ] = 1.0,
-        ctx: Context = None,
+    async def _edit_run(
+        prompt: str,
+        image: str,
+        negative_prompt: str,
+        strength: float,
+        width: int,
+        height: int,
+        num_inference_steps: int,
+        guidance_scale: float,
+        seed: int,
+        lora: str,
+        control_type: str,
+        control_scale: float,
+        ctx,
     ) -> list:
-        """img2img edit; returns the image inline (base64 PNG). The server never
-        writes files - the client saves the returned image where it wants
-        (identical in local and remote modes).
-        """
+        """Shared body of edit_image for all families (params validated and
+        mapped per family by _image2image)."""
         d = _family_defaults()
         steps = max(10, min(100, num_inference_steps or d["steps"]))
         if not guidance_scale:
@@ -2217,6 +2170,178 @@ def _build_server():
 
         data, _b64, elapsed, name = _finalize_result(edited, actual_seed, t0, prefix="img2img")
         return _image_result(data, name, actual_seed, elapsed, kind="edited image", base=_request_base(ctx))
+
+    # edit_image is registered exactly once; the schema differs by family:
+    # a config WITH 'control_types' exposes control_type/control_scale, a
+    # config WITHOUT them (e.g. qwen-image-2.1, whose pipeline has no
+    # ControlNet support) omits the knobs entirely - as far as MCP clients
+    # can tell, those parameters simply do not exist for this deployment.
+    _edit_tool_kwargs = dict(
+        name="edit_image",
+        title="Edit Image (img2img)",
+        description=_EDIT_IMAGE_DESC_LOCAL if _ALLOW_HOST_PATHS else _EDIT_IMAGE_DESC_REMOTE,
+    )
+    if _controlnet_available():
+
+        @server.tool(**_edit_tool_kwargs)
+        async def edit_image(
+            prompt: Annotated[
+                str,
+                Field(description="How to transform the image. English works best; be specific."),
+            ],
+            image: Annotated[
+                str,
+                Field(description=_IMG_FIELD_DESC_LOCAL if _ALLOW_HOST_PATHS else _IMG_FIELD_DESC_REMOTE),
+            ],
+            negative_prompt: Annotated[
+                str,
+                Field(description="Things to avoid, e.g. 'blurry, low quality'."),
+            ] = "",
+            strength: Annotated[
+                float,
+                Field(description="0..1: how strongly to transform (higher = more change). Default 0.6; clamped to 0.01..1.0."),
+            ] = 0.6,
+            width: Annotated[
+                int,
+                Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
+            ] = 0,
+            height: Annotated[
+                int,
+                Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
+            ] = 0,
+            num_inference_steps: Annotated[
+                int,
+                Field(description=f"Denoising steps; 0 = family default ({_fd('desc')}: {_fd('steps')}), clamped to 10..100. Effective steps ≈ steps × strength."),
+            ] = 0,
+            guidance_scale: Annotated[
+                float,
+                Field(description=f"How closely the result follows the prompt; 0 = family default ({_fd('desc')}: {_fd('guidance')}), range 1..15."),
+            ] = 0.0,
+            seed: Annotated[
+                int,
+                Field(description="Seed for reproducibility; -1 = random. The reply note reports the actual seed used."),
+            ] = -1,
+            lora: Annotated[
+                str,
+                Field(
+                    description=(
+                        "Apply LoRA adapter(s): comma-separated 'huggingface/org:weight' "
+                        "entries (weight defaults to 1.0). Only supported ids work; "
+                        "call list_loras to get valid ids."
+                    ),
+                ),
+            ] = "",
+            control_type: Annotated[
+                str,
+                Field(
+                    description=(
+                        "ControlNet control type applied to the source image (abstract; "
+                        "the server picks and hides the model). Currently supported: "
+                        + (", ".join(c for c in _control_types()) or "-")
+                        + ". Do a live lookup via list_control_types (the set can change "
+                        "server-side). Empty disables ControlNet."
+                    ),
+                ),
+            ] = "",
+            control_scale: Annotated[
+                float,
+                Field(
+                    description="ControlNet conditioning strength, typical range 0.4-1.0 (default 1.0).",
+                ),
+            ] = 1.0,
+            ctx: Context = None,
+        ) -> list:
+            """img2img edit; returns the image inline (base64 PNG). The server never
+            writes files - the client saves the returned image where it wants
+            (identical in local and remote modes).
+            """
+            return await _edit_run(
+                prompt,
+                image,
+                negative_prompt,
+                strength,
+                width,
+                height,
+                num_inference_steps,
+                guidance_scale,
+                seed,
+                lora,
+                control_type,
+                control_scale,
+                ctx,
+            )
+
+    else:
+
+        @server.tool(**_edit_tool_kwargs)
+        async def edit_image(
+            prompt: Annotated[
+                str,
+                Field(description="How to transform the image. English works best; be specific."),
+            ],
+            image: Annotated[
+                str,
+                Field(description=_IMG_FIELD_DESC_LOCAL if _ALLOW_HOST_PATHS else _IMG_FIELD_DESC_REMOTE),
+            ],
+            negative_prompt: Annotated[
+                str,
+                Field(description="Things to avoid, e.g. 'blurry, low quality'."),
+            ] = "",
+            strength: Annotated[
+                float,
+                Field(description="0..1: how strongly to transform (higher = more change). Default 0.6; clamped to 0.01..1.0."),
+            ] = 0.6,
+            width: Annotated[
+                int,
+                Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
+            ] = 0,
+            height: Annotated[
+                int,
+                Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
+            ] = 0,
+            num_inference_steps: Annotated[
+                int,
+                Field(description=f"Denoising steps; 0 = family default ({_fd('desc')}: {_fd('steps')}), clamped to 10..100. Effective steps ≈ steps × strength."),
+            ] = 0,
+            guidance_scale: Annotated[
+                float,
+                Field(description=f"How closely the result follows the prompt; 0 = family default ({_fd('desc')}: {_fd('guidance')}), range 1..15."),
+            ] = 0.0,
+            seed: Annotated[
+                int,
+                Field(description="Seed for reproducibility; -1 = random. The reply note reports the actual seed used."),
+            ] = -1,
+            lora: Annotated[
+                str,
+                Field(
+                    description=(
+                        "Apply LoRA adapter(s): comma-separated 'huggingface/org:weight' "
+                        "entries (weight defaults to 1.0). Only supported ids work; "
+                        "call list_loras to get valid ids."
+                    ),
+                ),
+            ] = "",
+            ctx: Context = None,
+        ) -> list:
+            """img2img edit; returns the image inline (base64 PNG). The server never
+            writes files - the client saves the returned image where it wants
+            (identical in local and remote modes).
+            """
+            return await _edit_run(
+                prompt,
+                image,
+                negative_prompt,
+                strength,
+                width,
+                height,
+                num_inference_steps,
+                guidance_scale,
+                seed,
+                lora,
+                "",   # control_type: not offered for this family
+                1.0,  # control_scale: unused without ControlNet
+                ctx,
+            )
 
     @server.tool(
         name="upload_image",
@@ -2341,20 +2466,24 @@ def _build_server():
             + shown
         )
 
-    @server.tool(
-        name="list_control_types",
-        title="List ControlNet Types",
-        description=(
-            "Return the abstract ControlNet control types valid for the "
-            "'control_type' parameter of edit_image (no model identifiers exposed)."
-        ),
-    )
-    async def list_control_types() -> str:
-        lines = []
-        for ctype, info in _control_types().items():
-            note = info["desc"]
-            lines.append(f"- {ctype}: {note}")
-        return "Control types for edit_image 'control_type':\n" + "\n".join(lines)
+    if _controlnet_available():
+        # Only expose the ControlNet discovery tool when the active config
+        # actually has control types; otherwise the tool would just report an
+        # empty set and advertise a knob that edit_image does not even accept.
+        @server.tool(
+            name="list_control_types",
+            title="List ControlNet Types",
+            description=(
+                "Return the abstract ControlNet control types valid for the "
+                "'control_type' parameter of edit_image (no model identifiers exposed)."
+            ),
+        )
+        async def list_control_types() -> str:
+            lines = []
+            for ctype, info in _control_types().items():
+                note = info["desc"]
+                lines.append(f"- {ctype}: {note}")
+            return "Control types for edit_image 'control_type':\n" + "\n".join(lines)
 
     return server
 
