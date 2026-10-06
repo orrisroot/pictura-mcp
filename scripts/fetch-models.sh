@@ -52,29 +52,6 @@ while IFS=$'\t' read -r kind rid; do
       org="${rid%%/*}"
       repo="${rid##*/}"
       dest="$MODELS_DIR/$org/$repo"
-      # The Qwen-Image 2.1 uncensored LoRA lives as a single file inside the
-      # abenzerps/Qwen-Image-2.1-Uncensored-GGUF repo (no standalone HF repo of
-      # the config id); fetch that one file, cached after the first run.
-      if [ "$rid" = "abenzerps/qwen-image-2.1-uncensored-lora" ]; then
-        file="$dest/qwen-image-2.1-uncensored-lora.safetensors"
-        if [ -s "$file" ]; then
-          echo "[fetch-models] already local (skip): $rid -> $file"
-          continue
-        fi
-        echo "[fetch-models] downloading lora: abenzerps/Qwen-Image-2.1-Uncensored-GGUF"
-        mkdir -p "$dest"
-        # Download to a temp file and move into place, so an interrupted
-        # transfer never leaves a truncated safetensors that the next run
-        # would treat as provisioned.
-        if curl -fsSL "https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF/resolve/main/qwen-image-2.1-uncensored-lora.safetensors" -o "$file.part"; then
-          mv "$file.part" "$file"
-        else
-          rm -f "$file.part"
-          echo "[fetch-models] error: failed to fetch $rid (not a standalone repo; see README)" >&2
-          exit 1
-        fi
-        continue
-      fi
       # Viggle turbo (few-step distilled Qwen adapter): fetch only the r256
       # LoRA file and the scheduler config - the repo also carries quantized
       # merged transformers, older LoRA versions and ComfyUI assets that the

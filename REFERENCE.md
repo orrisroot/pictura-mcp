@@ -166,8 +166,7 @@ re-exposes them under the same tool names.
 - Provision everything with `scripts/fetch-models.sh` (reads
   `server/model.json`; plain local dirs: repo ids →
   `models/<org>/<repo>/`). See the README for per-model `hf download`
-  examples, including the Qwen-Image 2.1 uncensored LoRA (a single file
-  fetched from the `abenzerps/Qwen-Image-2.1-Uncensored-GGUF` repo).
+  examples.
 - The server never contacts Hugging Face at startup or at tool-call time; a
   missing model surfaces as a provisioning error pointing at
   `scripts/fetch-models.sh`.

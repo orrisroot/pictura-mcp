@@ -81,8 +81,6 @@
       ]
     }
   },
-  "supported_loras": {
-    "abenzerps/qwen-image-2.1-uncensored-lora": "uncensored / no content-filter (Qwen-Image 2.1; requires manual file placement, see README)"
-  },
+  "supported_loras": {},
   "control_types": {}
 }

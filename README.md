@@ -320,10 +320,6 @@ Manually (`hf` ships in the project venv):
 ./.venv/bin/hf download Intel/dpt-hybrid-midas --local-dir models/Intel/dpt-hybrid-midas
 # openpose preprocessor (not an HF repo):
 curl -fsSL https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-pose.pt -o models/yolov8n-pose.pt
-# Qwen-Image 2.1 uncensored LoRA (single file inside the GGUF repo):
-mkdir -p models/abenzerps/qwen-image-2.1-uncensored-lora
-curl -fsSL https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF/resolve/main/qwen-image-2.1-uncensored-lora.safetensors \
-  -o models/abenzerps/qwen-image-2.1-uncensored-lora/qwen-image-2.1-uncensored-lora.safetensors
 ```
 
 Layout:
