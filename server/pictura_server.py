@@ -3076,19 +3076,19 @@ def _attach_http_middleware(
     async def _dispatch(request, call_next):
         if request.method == "POST" and request.url.path == "/images/upload":
             auth_ok = _auth_ok(request, token)
-            token = ""
+            upload_token = ""
             if not auth_ok:
-                token = request.headers.get("x-upload-token", "")
-                if not _claim_upload_token(token):
+                upload_token = request.headers.get("x-upload-token", "")
+                if not _claim_upload_token(upload_token):
                     return JSONResponse({"error": "unauthorized"}, status_code=401)
             try:
                 resp = await _upload_image(request)
             except BaseException:
                 if not auth_ok:
-                    _finish_upload_token(token, False)
+                    _finish_upload_token(upload_token, False)
                 raise
             if not auth_ok:
-                _finish_upload_token(token, resp.status_code == 200)
+                _finish_upload_token(upload_token, resp.status_code == 200)
             return resp
         if request.url.path.startswith("/images/"):
             return await _serve_image(request)
