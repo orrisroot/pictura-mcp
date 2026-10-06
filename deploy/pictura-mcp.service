@@ -1,30 +1,23 @@
-# Template: system-level systemd unit running as a dedicated service account.
-# Replace <PROJECT_ROOT> and <SERVICE_USER> (or use deploy/install-systemd.sh).
+# pictura-mcp.service — systemd unit for the installed deployment.
+# Layout (see README §Remote (http)): app /opt/pictura-mcp, config
+# /etc/pictura-mcp/env, service account via /etc/sysusers.d/pictura-mcp.conf.
 [Unit]
 Description=Image generation MCP server (Stable Diffusion on a local GPU)
-Documentation=file://<PROJECT_ROOT>/README.md
+Documentation=file:///opt/pictura-mcp/README.md
 After=network.target
 
 [Service]
 Type=simple
-# Run under a dedicated, unprivileged service account (create it first).
-User=<SERVICE_USER>
-Group=<SERVICE_USER>
-WorkingDirectory=<PROJECT_ROOT>
-# API key / model / serving / log settings come from this env file (owned by the service user).
-EnvironmentFile=<PROJECT_ROOT>/deploy/pictura-mcp.env
-# Read-write areas for the service user only (ProtectSystem=strict makes the
-# rest of the FS read-only). The server only reads weights from models/ (they
-# are provisioned by scripts/fetch-models.sh before start); the '-' prefix
-# tolerates a missing path. install-systemd.sh rewrites this line from
-# deploy/pictura-mcp.env (PICTURA_LOG_FILE) — keep them in sync when editing
-# the unit by hand.
-ReadWritePaths=-<PROJECT_ROOT>/models
-ExecStart=<PROJECT_ROOT>/.venv/bin/python \
-    <PROJECT_ROOT>/server/pictura_server.py \
+User=pictura-mcp
+Group=pictura-mcp
+WorkingDirectory=/opt/pictura-mcp
+EnvironmentFile=/etc/pictura-mcp/env
+# Service home: runtime caches; weights stay read-only.
+ReadWritePaths=-/var/lib/pictura-mcp
+ExecStart=/opt/pictura-mcp/.venv/bin/python \
+    /opt/pictura-mcp/server/pictura_server.py \
     --transport http
-# Bind address / TCP port come from PICTURA_HOST / PICTURA_PORT in
-# deploy/pictura-mcp.env (defaults: 0.0.0.0 / 8000).
+# Bind address / TCP port come from PICTURA_HOST / PICTURA_PORT in /etc/pictura-mcp/env.
 
 # ---- hardening ------------------------------------------------------------
 NoNewPrivileges=true

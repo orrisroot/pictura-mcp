@@ -1,8 +1,9 @@
-# Pictura MCP — Specification
+# Pictura MCP — Server reference
 
-This document is the authoritative specification of `pictura-mcp`: the
-image-gen backend (`server/pictura_server.py`) and how to connect any MCP
-client (stdio, streamable HTTP, SSE).
+A concise reference for operating the server (`server/pictura_server.py`):
+tool parameters, CLI flags, environment variables, security policy and size
+limits. Setup, client configuration and deployment steps live in
+[`README.md`](README.md#remote-http).
 
 ---
 
@@ -47,7 +48,7 @@ MCP client ──────────────────▶ pictura_ser
 |---|---|---|---|
 | `prompt` | string | — | required |
 | `negative_prompt` | string | `""` | only used when CFG is active (Qwen-Image 2.1: `guidance_scale > 1`) |
-| `width` / `height` | int | 0 = family default | any positive value snaps to the nearest native training bucket of the active model (min 256, multiple of 8) |
+| `width` / `height` | int | 0 = family default | any positive value snaps to the nearest configured bucket of the active model (min 256, multiple of 8) |
 | `num_inference_steps` | int | 0 = family default | clamped to [10, 100] |
 | `guidance_scale` | float | 0 = family default | mapped to `true_cfg_scale` for Qwen-Image 2.1 |
 | `seed` | int | -1 | -1 = random |
@@ -61,7 +62,7 @@ MCP client ──────────────────▶ pictura_ser
 | `image` | string | — | required. Source: a server image URL (`http://<host>/images/<id>`, resolved from the in-memory cache) or an external image URL (fetched server-side, SSRF-guarded). On a local stdio run a host file path / `file://` URI is also accepted; over http/sse the server reads no host files |
 | `negative_prompt` | string | `""` | only used when CFG is active (Qwen-Image 2.1: `guidance_scale > 1`) |
 | `strength` | float | 0.6 | 0..1, higher = more change. Omitted from the `qwen-image-2.1` schema (its edit always runs the full step count) |
-| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value snaps to the nearest native bucket. Qwen-Image 2.1: the source is resized to the snapped pair first, then the pipeline derives the output from that aspect |
+| `width` / `height` | int | 0 | 0 = keep the source size (also snapped); any positive value snaps to the nearest configured bucket. Qwen-Image 2.1: the source is resized to the snapped pair first, then the pipeline derives the output from that aspect |
 | `num_inference_steps` | int | 0 = family default | effective steps ≈ `steps × strength` |
 | `guidance_scale` | float | 0 = family default | mapped to `true_cfg_scale` for Qwen-Image 2.1 |
 | `seed` | int | -1 | -1 = random |
@@ -72,7 +73,7 @@ MCP client ──────────────────▶ pictura_ser
 ### `upload_image`
 
 Reserves an upload over http/sse: returns a **one-time token** (TTL
-`PICTURA_IMAGE_UPLOAD_TICKET_TTL`, default 120 s, single use) plus the
+`PICTURA_IMAGE_UPLOAD_TOKEN_TTL`, default 120 s, single use) plus the
 `POST /images/upload` URL and a ready-to-run `curl` line. The client then
 POSTs the image bytes (raw or multipart `file`) with the `X-UPLOAD-TOKEN`
 header. The token is consumed only after a successful upload, released for
@@ -116,7 +117,7 @@ All model settings live in one deployment-local file, `server/model.json`
   (`sdxl`, `sd35-medium`, `sd35-large`, `qwen-image-2.1`)
 - `vae` — optional custom VAE id (`null` = auto)
 - `families.<id>` — per-family settings: `desc`, `steps`, `guidance`,
-  `width` / `height`, `auto_vae`, `buckets` (native resolutions; rotations
+  `width` / `height`, `auto_vae`, `buckets` (supported resolutions; rotations
   are added automatically)
 - `supported_loras` — id → description map (client-usable LoRAs)
 - `control_types` — `pre` / `model` / `prep_model` per abstract type
@@ -128,23 +129,11 @@ Weights are plain local directories under `PICTURA_MODELS_DIR` (default
 model raises a provisioning error. SDXL families use the configured
 `auto_vae` (fp16-safe VAE) automatically.
 
-### Model-aware defaults
-
-| Family | Default W×H | Default steps | Guidance |
-|---|---|---|---|
-| `sdxl` | 1024×1024 | 30 | 7.0 |
-| `sd35-medium` / `sd35-large` | 1024×1024 | 40 | 4.5 |
-| `qwen-image-2.1` | 1024×1024 | 40 | 1.0 (no CFG; `>1` + negative prompt enables CFG) |
-| `qwen-image-2.1` + turbo (Viggle) | 1024×1024 | 6 | 1.0 fixed (no CFG; raw sigma schedule; `guidance_scale` / `negative_prompt` / client `lora` ignored) |
-
-Requested sizes snap to the family's native training buckets (`buckets` in
-the config), so output stays on the aspect/area combinations the model was
-trained on.
-
 ### Memory strategy
 
-1. fp16 weights loaded (bf16 for Qwen-Image 2.1); attention slicing + VAE
-   slicing + VAE tiling enabled.
+1. fp16 weights loaded (bf16 for Qwen-Image 2.1); attention slicing enabled.
+   VAE decode slicing/tiling are **opt-in** (default off — the tiled path
+   leaves faint periodic color bands; see §6).
 2. **Proactive CPU offload** when the model is SDXL with default res ≥ 768, or
    whenever weights exceed ~80% of VRAM. Qwen-Image 2.1 (~31 GB bf16) exceeds
    80% of a 24–32 GB card, so it always runs with model CPU offload
@@ -174,8 +163,8 @@ re-exposes them under the same tool names.
 
 - Client-supplied ids are bare `org/repo` only; URLs and local paths are
   rejected; weights load safetensors-only.
-- Provision everything with `sudo scripts/fetch-models.sh` (reads
-  `server/model.json`; written as plain local dirs: repo ids →
+- Provision everything with `scripts/fetch-models.sh` (reads
+  `server/model.json`; plain local dirs: repo ids →
   `models/<org>/<repo>/`). See the README for per-model `hf download`
   examples, including the Qwen-Image 2.1 uncensored LoRA (a single file
   fetched from the `abenzerps/Qwen-Image-2.1-Uncensored-GGUF` repo).
@@ -203,7 +192,7 @@ python server/pictura_server.py [options]
 
 - http → endpoint `/mcp` (streamable HTTP); sse → endpoint `/sse`
 - **Image upload**: `upload_image` issues a one-time token (TTL
-  `PICTURA_IMAGE_UPLOAD_TICKET_TTL`, default 120 s); POST raw bytes or
+  `PICTURA_IMAGE_UPLOAD_TOKEN_TTL`, default 120 s); POST raw bytes or
   multipart/form-data `file` to `/images/upload` with the `X-UPLOAD-TOKEN`
   header (body capped by `--max-body-mb`; the `PICTURA_API_KEY` header is
   also accepted). The image lands in the same in-memory TTL cache and is
@@ -226,7 +215,7 @@ python server/pictura_server.py [options]
   reverse proxies.
 - **`server_status` exposes no internal state over http/sse**: only `model`
   and the size policy are reported remotely.
-- **Upload tickets are one-shot and concurrency-safe**: consumed only after a
+- **Upload tokens are one-shot and concurrency-safe**: consumed only after a
   successful upload; a failed upload releases the token for retry; a
   concurrent POST with the same token is rejected (401).
 - **Arbitrary-path writes are impossible**: tools accept no output path; the
@@ -259,7 +248,6 @@ python server/pictura_server.py [options]
 | `PICTURA_MODELS_DIR` | `<project>/models` | root of the standard local model layout |
 | `PICTURA_MAX_CONCURRENT` | `auto` | render slot pool size: integer pins it, `1` = strictly serial, `auto` = sized from free VRAM |
 | `PICTURA_MULTI_GPU_RESERVE_GIB` | `5` | per-GPU activation reserve (GiB) when loading model-parallel: per-card cap = total VRAM − reserve |
-| `PICTURA_SLOT_CAP` | `3` | safety cap for auto-sized slot pool (integer; ignored when `PICTURA_MAX_CONCURRENT` is pinned) |
 | `PICTURA_SLOT_CAP` | `3` | safety cap for the auto-sized slot pool (ignored when `PICTURA_MAX_CONCURRENT` is an integer) |
 | `PICTURA_PUBLIC_URL` | unset | required for non-loopback http/sse binds; externally visible base (scheme + host + path prefix) |
 | `PICTURA_IMAGE_CACHE_TTL` | `600` | seconds an image download URL stays valid |
@@ -268,129 +256,11 @@ python server/pictura_server.py [options]
 | `PICTURA_HOST` | `127.0.0.1` | bind address for http/sse (CLI `--host` overrides) |
 | `PICTURA_PORT` | `8001` | TCP port for http/sse (CLI `--port` overrides) |
 | `PICTURA_IMAGE_MAX_BODY_MB` | `16` | body cap for http/sse; bounds image uploads and external image fetches |
-| `PICTURA_IMAGE_UPLOAD_TICKET_TTL` | `120` | upload ticket TTL (seconds) from `upload_image` |
+| `PICTURA_IMAGE_UPLOAD_TOKEN_TTL` | `120` | upload token TTL (seconds) from `upload_image` |
 | `PICTURA_API_KEY` | unset | API key; clients send it in the `PICTURA_API_KEY` header; fallback when `--api-key` not given |
-| `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); reopened on SIGHUP for logrotate |
+| `PICTURA_LOG_FILE` | unset (stderr) | append `[pictura-mcp]` logs to a file (also `--log-file`); default stderr/journald |
 
 ---
-
-## 7. Size limits (image input)
-
-Source images are bounded server-side: `POST /images/upload` bodies and
-external image fetches use the `--max-body-mb` cap (default **16 MB**).
-Raise `PICTURA_IMAGE_MAX_BODY_MB` / `--max-body-mb` only for very large
-sources. Stdio (local) has no body cap.
-
-Generation and edit sizes stay at the native-bucket level of the active
-model family, so compute and memory do not depend on the requested aspect
-ratio (e.g. 1536×640 costs about the same as 1024×1024).
-
----
-
-## 8. Client configuration
-
-The server is a standard MCP server (stdio, streamable HTTP, SSE); every
-client stores server definitions in the same shape:
-
-```jsonc
-{
-  "mcpServers": {
-    "pictura": {
-      "command": "<PROJECT_ROOT>/.venv/bin/python",
-      "args": ["<PROJECT_ROOT>/server/pictura_server.py"],
-      "env": { "PICTURA_MODEL_CONFIG": "<PROJECT_ROOT>/server/model.json" }
-    }
-  }
-}
-```
-
-- **Generic / Claude Code / Cursor / Windsurf / VS Code**: project
-  `.mcp.json` (template: `deploy/mcp.json.example`) or the client's own
-  config file.
-- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Remote (HTTP)**: `deploy/mcp.remote.json.example` — `url` +
-  `PICTURA_API_KEY` header instead of `command`/`args`:
-
-```json
-{
-  "mcpServers": {
-    "pictura": {
-      "url": "http://<HOST>:8001/mcp",
-      "headers": { "PICTURA_API_KEY": "<TOKEN>" },
-      "requestTimeoutMs": 600000
-    }
-  }
-}
-```
-
-**Client timeout** (`requestTimeoutMs`): set it generously — a generation at
-the family default (1024², 30–40 steps) takes tens of seconds to minutes, and
-under parallel load a job may additionally wait for a free slot. The MCP SDK
-default (60 s) times out on ordinary generations; the templates use 600000
-(10 min).
-
----
-
-## 9. Deployment
-
-**Tracked vs gitignored**: only templates are committed. Real configs and
-artifacts are created locally on each machine (see §10): `.mcp.json`,
-`deploy/pictura-mcp.env` (secrets), `server/model.json`, `.venv/`, `outputs/`.
-
-- **Venv**: `.venv` (Python 3.12+; `requirements.txt` pins `torch>=2.9,<3.0`,
-  CUDA-13-capable driver, ≥580). **Volta/V100 machines**: use
-  `server/requirements-v100.txt` (torch 2.7.1+cu126) instead — newer torch
-  builds dropped the sm_70 kernels.
-- **systemd (recommended for long-running / remote)**: `deploy/install-systemd.sh
-  <PROJECT_ROOT> [SERVICE_USER] [PORT]` (root) creates the unprivileged
-  account, prepares the models/log dirs, renders the unit
-  (`deploy/pictura-mcp.service`) and enables it. The env file
-  (`deploy/pictura-mcp.env`, gitignored) holds the API key / model / serving /
-  log settings.
-- **One process at a time**: keeping several servers alive exhausts VRAM and
-  causes CUDA OOM. Use systemd instead of ad-hoc background processes.
-
----
-
-## 10. Project structure
-
-**Committed (sources & templates):**
-```
-README.md                        # usage guide (any MCP client)
-SPEC.md                          # this document
-LICENSE                          # MIT license
-scripts/
-  check.sh                       # lightweight dev checks (no GPU needed)
-  fetch-models.sh                # provision weights (deployment step)
-deploy/
-  mcp.json.example               # client config TEMPLATE (project .mcp.json)
-  mcp.remote.json.example        # HTTP client config TEMPLATE
-  pictura-mcp.service            # systemd system-unit TEMPLATE
-  install-systemd.sh             # root installer: account + dirs + unit
-  pictura-mcp.env.example        # env TEMPLATE (API key / model / serving / log)
-  logrotate.example              # logrotate config (copytruncate + SIGHUP)
-server/
-  pictura_server.py              # MCP image server (the implementation)
-  requirements.txt               # python deps
-  requirements-v100.txt          # python deps for Volta/V100 (torch 2.7.1+cu126)
-  examples/                      # model config PRESETS (sdxl / sd35-medium /
-                                 #   sd35-large / qwen-image-2.1)
-skills/
-  README.md                      # Agent Skill install guide
-  pictura-mcp/SKILL.md           # the Agent Skill (operating policy for agents)
-.gitignore
-```
-**Created per machine (gitignored):**
-```
-.mcp.json                        # client config - from deploy/mcp.json.example
-deploy/pictura-mcp.env           # secrets - from deploy/pictura-mcp.env.example
-server/model.json                # model config - from server/examples/*.json
-.venv/                           # python env (requirements.txt or
-                                 #   requirements-v100.txt on V100)
-outputs/                         # created by: server/pictura_server.py --smoke
-```
-Steps: README (§Setup). Git tracking policy (.gitignore) is not part of this
-spec.
 
 ### VAE decode slicing / tiling (opt-in)
 
@@ -401,3 +271,60 @@ own docs note "tile-sized changes in the output"). Qwen-Image 2.1 decodes a
 1024² image in ~1.4 GiB VRAM without tiling, so keep it off there — the
 bands appear as vertical streaks on smooth shapes (their spacing follows
 `tile_sample_stride` × `spatial_compression_ratio`).
+
+---
+
+## 7. Size limits (image input)
+
+Source images are bounded server-side: `POST /images/upload` bodies and
+external image fetches use the `--max-body-mb` cap (default **16 MB**).
+Raise `PICTURA_IMAGE_MAX_BODY_MB` / `--max-body-mb` only for very large
+sources. Stdio (local) has no body cap.
+
+Generation and edit sizes stay at the configured aspect-ratio-bucket level of the active
+model family, so compute and memory do not depend on the requested aspect
+ratio (e.g. 1536×640 costs about the same as 1024×1024).
+
+---
+
+## 8. Project structure
+
+**Committed (sources & templates):**
+```
+README.md                        # usage guide (any MCP client)
+REFERENCE.md                     # server reference (this document)
+CHANGELOG.md                     # release history
+LICENSE                          # MIT license
+scripts/
+  check.sh                       # lightweight dev checks (no GPU needed)
+  fetch-models.sh                # provision weights (deployment step)
+deploy/
+  mcp.json.example               # client config TEMPLATE (project .mcp.json)
+  mcp.remote.json.example        # HTTP client config TEMPLATE
+  pictura-mcp.service            # systemd system unit (concrete /opt|/etc paths)
+  pictura-mcp.env.example        # env TEMPLATE (-> /etc/pictura-mcp/env)
+  sysusers.d/pictura-mcp.conf    # service account definition (systemd-sysusers)
+  install-files.txt              # rsync --files-from: repo -> /opt/pictura-mcp
+server/
+  pictura_server.py              # MCP image server (the implementation)
+  requirements.txt               # python deps
+  requirements-v100.txt          # python deps for Volta/V100 (torch 2.7.1+cu126)
+  examples/                      # model config PRESETS (sdxl / sd35-medium /
+                                 #   sd35-large / qwen-image-2.1 /
+                                 #   qwen-image-2.1-turbo)
+skills/
+  README.md                      # Agent Skill install guide
+  pictura-mcp/SKILL.md           # the Agent Skill (operating policy for agents)
+.gitignore
+```
+**Created per machine (gitignored):**
+```
+.mcp.json                        # client config - from deploy/mcp.json.example
+/etc/pictura-mcp/env             # secrets - from deploy/pictura-mcp.env.example
+server/model.json                # model config - from server/examples/*.json
+.venv/                           # python env (requirements.txt or
+                                 #   requirements-v100.txt on V100)
+outputs/                         # created by: server/pictura_server.py --smoke
+```
+Steps: README (§Local (stdio) / §Remote (http)). Git tracking policy (.gitignore) is not part of this
+spec.

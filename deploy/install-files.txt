@@ -1,0 +1,7 @@
+# Files that belong in the installed app directory (/opt/pictura-mcp).
+# rsync -a --files-from=deploy/install-files.txt ./ /opt/pictura-mcp/
+# Everything else in the repo (templates, docs, skills) stays in the repo;
+# configuration lives under /etc (see README §Remote (http)).
+README.md
+server/
+scripts/fetch-models.sh

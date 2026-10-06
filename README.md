@@ -13,6 +13,25 @@ MCP client ──────────────────▶ pictura_ser
   Qwen-Image 2.1 via Hugging Face `diffusers`.
 - **Client**: any MCP client; see § [Client configuration](#client-configuration).
 
+## Run modes
+
+Start here. Which of these is you?
+
+- **Local** — try it on this machine: your MCP client launches the server as
+  a child process (stdio). Follow **§Local (stdio)**.
+- **Remote** — an always-on server that clients reach over the network,
+  deployed as a systemd service. The other path, §Local (stdio), prepares a
+  repo `.venv` + client config; a remote deployment is self-contained:
+  follow **§Remote (http)** below from start to finish; it creates
+  everything it needs under `/opt` / `/etc` and does not use anything from
+  the local path.
+- **The server is already running somewhere** — skip both; you only need
+  §Client configuration.
+
+Not sure yet? Do the local path first — §Local (stdio) shows the server
+generating an image; having done it or not makes no difference to a later
+§Remote (http) deployment (the two paths do not share `.venv` or config).
+
 ## Tools
 
 | Tool | Description |
@@ -46,10 +65,17 @@ pipeline is loaded model-parallel across the cards instead of one card +
 CPU offload; set `PICTURA_MAX_CONCURRENT=2` to run two independent slots
 (one per GPU-pair, best for throughput).
 
-## Setup
+## Local (stdio)
+
+What you get: a repo-local `.venv`, `server/model.json` and a client config,
+so the server runs from this repo. Expect a few GB of downloads (torch
+CUDA build ~3 GB + model weights); the first generation loads the model and
+can take a minute. Every step is safe to re-run.
 
 ```bash
 # 1) Python venv + dependencies (torch CUDA build, ~3 GB)
+#    prereq: C toolchain + Python 3 dev headers for the interpreter used
+#    below (Debian/Ubuntu: build-essential python3-dev; Fedora/RHEL: gcc python3-devel)
 #    V100 / Volta (compute capability 7.0) machines:
 #      ./.venv/bin/pip install -r server/requirements-v100.txt
 python3 -m venv .venv
@@ -58,10 +84,10 @@ python3 -m venv .venv
 # 2) Activate a model preset -> server/model.json
 cp server/examples/model.sd35-large.json server/model.json
 #    other presets: model.sdxl.json / model.sd35-medium.json /
-#    model.qwen-image-2.1.json
+#    model.qwen-image-2.1.json / model.qwen-image-2.1-turbo.json
 
-# 3) Provision the models (weights are never downloaded by the server)
-sudo scripts/fetch-models.sh
+# 3) Provision the models
+scripts/fetch-models.sh
 
 # 4) Smoke test (writes outputs/smoke_test.png)
 ./.venv/bin/python server/pictura_server.py --smoke
@@ -69,10 +95,15 @@ sudo scripts/fetch-models.sh
 # 5) Connect from your MCP client (see below)
 ```
 
-Disk layout — the repo ships templates; these files are created per machine
+You're done when step 4 prints success and `outputs/smoke_test.png` exists.
+If it fails: the CUDA driver / torch build is incompatible (§CUDA driver
+version), or step 3 left `models/` incomplete — re-run it.
+
+Disk layout (this path) — per-machine files created in the repo
 (gitignored): `.mcp.json` (from `deploy/mcp.json.example`),
-`deploy/pictura-mcp.env` (secrets), `server/model.json` (copied preset),
-`.venv/`, `outputs/`.
+`server/model.json` (copied preset), `.venv/`, `outputs/`. In a §Remote
+(http) deployment the same roles live under `/opt/pictura-mcp` and
+`/etc/pictura-mcp` instead.
 
 ### CUDA driver version
 
@@ -83,6 +114,12 @@ dropped the sm_70 kernels and generation fails with
 `CUDA error: no kernel image is available`.
 
 ## Client configuration
+
+Pick the block that matches how the server runs — **Local (stdio)** or
+**Remote (http)**. Both are just connection info for your MCP client; the
+server is what has to be running first.
+
+**Local (stdio)** — client on the same machine:
 
 ```jsonc
 {
@@ -96,6 +133,10 @@ dropped the sm_70 kernels and generation fails with
   }
 }
 ```
+
+**Remote (http)** — a systemd service (§Remote (http)): see
+`deploy/mcp.remote.json.example` — `url` + `PICTURA_API_KEY` header instead of
+`command`/`args`.
 
 `requestTimeoutMs` must allow for GPU rendering time: a generation at the
 family default (1024², 30–40 steps) takes tens of seconds to minutes. The MCP
@@ -114,84 +155,117 @@ Quick start for any client that reads `.mcp.json`:
 cp deploy/mcp.json.example .mcp.json   # then replace <PROJECT_ROOT>
 ```
 
-## Running the server standalone / remote
+## Remote (http)
+
+The deployment path for an always-on server that clients reach over the
+network: the HTTP/SSE server runs as a systemd service. Declarative: the
+commands below run from the **repo root**
+(`deploy/…` is relative to it), and every step is safe to re-run.
+
+When you're done you'll have:
+
+- **app** at `/opt/pictura-mcp` — from the repo only `server/`,
+  `scripts/fetch-models.sh` and `README.md` are copied in (see
+  `deploy/install-files.txt`); `.venv/` and `models/` are created on the host.
+  Templates and docs stay in the repo.
+- **configuration** at `/etc/pictura-mcp/env` (secrets, 0600 root:pictura-mcp)
+- a dedicated, unprivileged **service account** `pictura-mcp` (no login)
+- a hardened **unit** `/etc/systemd/system/pictura-mcp.service`; logs go to
+  the journal
+
+### Before you start
+
+- **CUDA driver** working (`nvidia-smi`) and the build toolchain: a C
+  compiler plus the Python 3 dev headers matching the interpreter used in
+  step 1 (Debian/Ubuntu: `build-essential python3-dev`; Fedora/RHEL:
+  `gcc python3-devel`)
+- **an API key and port**, and — if clients connect over the network —
+  a **`PICTURA_PUBLIC_URL`**: it is required for non-loopback binds (the
+  server refuses to start without it)
+- disk: a few GB (pip deps ~3 GB + model weights)
+
+### 1) App, venv, weights
 
 ```bash
-./.venv/bin/python server/pictura_server.py \
-  --transport http \
-  --host 0.0.0.0 \
-  --port 8001 \
-  --api-key my-secret-key
+# app into /opt (source = this repo root; deploy/... is relative to it)
+rsync -a --files-from=deploy/install-files.txt ./ /opt/pictura-mcp/
+
+# model preset -> /opt/pictura-mcp/server/model.json (choose one from server/examples/)
+cp server/examples/model.qwen-image-2.1-turbo.json /opt/pictura-mcp/server/model.json
+
+# python venv + deps
+python3 -m venv /opt/pictura-mcp/.venv
+/opt/pictura-mcp/.venv/bin/pip install -r /opt/pictura-mcp/server/requirements.txt
+
+# weights (downloads once)
+/opt/pictura-mcp/scripts/fetch-models.sh
 ```
 
-- `--transport http` (endpoint `/mcp`) or `--transport sse` (endpoint `/sse`)
-- `--api-key <key>` (or `PICTURA_API_KEY`) — **required for http/sse**; clients
-  send it via the `PICTURA_API_KEY` header
-- `--max-body-mb <MB>` (default 16) caps the HTTP request body: image uploads
-  and external image fetches
-- `PICTURA_PUBLIC_URL` is required when binding a non-loopback address (the
-  externally visible base, including any reverse-proxy path prefix); on
-  loopback the request `Host` is used. Cache knobs:
-  `PICTURA_IMAGE_CACHE_TTL` / `_MAX` / `_MAX_MB`.
-
-Remote client config (`deploy/mcp.remote.json.example`):
-
-```json
-{
-  "mcpServers": {
-    "pictura": {
-      "url": "http://<SERVER_HOST_OR_IP>:8001/mcp",
-      "headers": { "PICTURA_API_KEY": "<TOKEN>" },
-      "requestTimeoutMs": 600000,
-      "toolPrefix": ""
-    }
-  }
-}
-```
-
-### systemd (long-running / remote)
-
-Prerequisite: Setup steps 1–3 (`.venv`, `server/model.json`, weights). The
-installer registers the unit but does not start it:
+### 2) Service account
 
 ```bash
-sudo deploy/install-systemd.sh /absolute/path/to/repo pictura-mcp 8001
+sudo install -d -m 755 /etc/sysusers.d
+sudo cp deploy/sysusers.d/pictura-mcp.conf /etc/sysusers.d/
+sudo systemd-sysusers
 ```
 
-- `deploy/pictura-mcp.env` is created from the template with an
-  auto-randomized `PICTURA_API_KEY` and pre-seeded host/port/public URL —
-  edit only what needs changing (`sudoedit deploy/pictura-mcp.env`).
-- Start and verify:
+Creates `pictura-mcp` (home `/var/lib/pictura-mcp`, shell
+`/usr/sbin/nologin`).
+
+### 3) Configuration (secrets)
 
 ```bash
-sudo systemctl start pictura-mcp
-journalctl -u pictura-mcp -f   # wait for "Model ready (...)"
+sudo install -d -m 750 -o root -g pictura-mcp /etc/pictura-mcp
+sudo install -m 600 -o root -g pictura-mcp deploy/pictura-mcp.env.example /etc/pictura-mcp/env
 ```
 
-Runs under the unprivileged `pictura-mcp` account with systemd hardening; the
-models dir and log file are whitelisted in `ReadWritePaths`. If the service
-crashes at startup, remove `MemoryDenyWriteExecute=true` from the unit and
-`systemctl daemon-reload && restart`.
+Then **edit `/etc/pictura-mcp/env`** — this is the one file you'll keep
+touching:
 
-**Env template change (non-destructive)**: the installer records a fingerprint
-of the env template. When the template changes in a repo update, your
-`deploy/pictura-mcp.env` is untouched and a rendered copy with your values is
-written to `deploy/pictura-mcp.env.new`; diff and merge, delete the file, then
-run `deploy/install-systemd.sh --adopt-env`.
+- `PICTURA_API_KEY` — replace the placeholder (clients authenticate with this)
+- `PICTURA_HOST=0.0.0.0` / `PICTURA_PORT` — uncomment/adjust for network access
+- `PICTURA_PUBLIC_URL` — externally visible base (required, see above)
+- `PICTURA_MODEL_CONFIG` — can stay commented: the unit runs with
+  `WorkingDirectory=/opt/pictura-mcp`, so the default `server/model.json`
+  resolves to `/opt/pictura-mcp/server/model.json`
+- `PICTURA_CUDA_DEVICE`, `PICTURA_MAX_CONCURRENT` — GPU / slot tuning, see
+  REFERENCE §6
 
-**User-scope service (quick alternative)**:
+### 4) Unit + start
 
 ```bash
-cp deploy/pictura-mcp.env.example deploy/pictura-mcp.env   # set PICTURA_API_KEY
-chmod 600 deploy/pictura-mcp.env
-mkdir -p ~/.config/systemd/user
-sed 's#<PROJECT_ROOT>#/absolute/path/to/repo#' \
-  deploy/pictura-mcp.service > ~/.config/systemd/user/pictura-mcp.service
-# remove the User= / Group= lines for a user unit
-systemctl --user daemon-reload && systemctl --user enable --now pictura-mcp
+sudo install -m 644 deploy/pictura-mcp.service /etc/systemd/system/
+# SELinux only — default-on in Fedora/RHEL; skip when `getenforce` shows Disabled
+sudo restorecon -RFv /etc/pictura-mcp /etc/sysusers.d/pictura-mcp.conf \
+           /etc/systemd/system/pictura-mcp.service
+sudo systemctl daemon-reload && sudo systemctl enable --now pictura-mcp
 ```
 
-Log rotation: `deploy/logrotate.example` (copytruncate, or SIGHUP postrotate).
+### Verify it is up
+
+```bash
+systemctl is-active pictura-mcp     # expect: active
+journalctl -u pictura-mcp -f        # watch until the "Model ready" line
+```
+
+If it is not active, check the journal: a placeholder `PICTURA_API_KEY` or a
+missing `PICTURA_PUBLIC_URL` makes the server refuse to start, and step 1
+must have completed (toolchain + weights). `env` and `model.json` are read
+at startup — after changing either, `systemctl restart pictura-mcp`.
+
+### Make it reachable
+
+- open the port in the host firewall if one is active — examples:
+  Fedora/RHEL `firewall-cmd --permanent --add-port=<port>/tcp && firewall-cmd --reload`,
+  Debian/Ubuntu `ufw allow <port>/tcp`
+- clients connect with `url` (the `PICTURA_PUBLIC_URL`) + the `PICTURA_API_KEY`
+  header — template `deploy/mcp.remote.json.example`, see §Client configuration
+
+### Updates
+
+Re-run step 1 (rsync picks up new code/presets; re-run `fetch-models.sh` if
+weights changed), then `systemctl restart pictura-mcp`. Configuration changes
+touch `/etc/pictura-mcp/env` only.
 
 ## Model configuration
 
@@ -232,7 +306,7 @@ Hugging Face; every weight is a plain local directory under
 `PICTURA_MODELS_DIR` (default `<project>/models`):
 
 ```bash
-sudo scripts/fetch-models.sh   # base model + VAE + LoRA + ControlNet + preprocessors
+scripts/fetch-models.sh   # base model + VAE + LoRA + ControlNet + preprocessors
 ```
 
 Manually (`hf` ships in the project venv):
@@ -275,9 +349,8 @@ ratios at ~1MP; Qwen-Image 2.1 carries its 7 model-card ratios in both the
 ~1MP class (1024² … 1536×864) and the official 2K class (2048×2048 …
 2752×1536). `buckets` is per-deployment configuration: trim it in
 `server/model.json` if the host's VRAM cannot cover a class.
-Off-bucket sizes (e.g. 512×512) produce tiled/duplicated patterns. Lower-VRAM
-cards auto-fall back to CPU offload; CUDA-OOM at runtime also auto-offloads
-and retries.
+Lower-VRAM cards auto-fall back to CPU offload; CUDA-OOM at runtime also
+auto-offloads and retries.
 
 
 ## Image editing (img2img)
@@ -303,12 +376,14 @@ also exercises the img2img path.
 
 - Uploaded / fetched source images are bounded by `--max-body-mb`
   (default 16 MB); raise it only for very large source images.
-- fp16/bf16 weights + attention/VAE slicing + proactive CPU offload + OOM
-  auto-retry are built in for low-VRAM cards.
+- fp16/bf16 weights + attention slicing + proactive CPU offload + OOM
+  auto-retry are built in for low-VRAM cards. VAE decode slicing/tiling is
+  **opt-in** (`PICTURA_VAE_SLICING` / `PICTURA_VAE_TILING`) because the tiled
+  path leaves faint periodic color bands in the output.
 - `PICTURA_CUDA_DEVICE` (e.g. `0` or `0,1`) restricts which CUDA GPUs the
   server uses.
 - `PICTURA_LOG_FILE` (or `--log-file`) appends the `[pictura-mcp]` log to a
-  file (default stderr/journald; reopened on SIGHUP for logrotate).
+  file (default stderr/journald).
   **Privacy: prompts and tool arguments are never written to any log.**
 
 ## LoRA & ControlNet
@@ -347,6 +422,7 @@ or model download needed).
 
 ## Docs
 
-- `SPEC.md` — full technical specification
+- `REFERENCE.md` — server reference (tool parameters, CLI, env vars, security, size limits)
+- `CHANGELOG.md` — release history
 - `skills/pictura-mcp/SKILL.md` — Agent Skill for end-user agents
-- `deploy/` — configuration templates + systemd unit
+- `deploy/` — client config templates, env template, sysusers definition, systemd unit, install manifest

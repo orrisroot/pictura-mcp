@@ -7,7 +7,7 @@
 # Config: server/model.json (deployment-local; copy a preset from
 # server/examples/*.json, or pass any config path as the first argument).
 # Run BEFORE starting the server (the service never downloads):
-#   sudo scripts/fetch-models.sh [/path/to/model.json]
+#   scripts/fetch-models.sh [/path/to/model.json]
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

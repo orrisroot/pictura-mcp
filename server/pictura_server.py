@@ -37,7 +37,7 @@ URL image return (http/sse only):
     PICTURA_IMAGE_CACHE_MAX_MB      max total cache bytes (default 512)
     PICTURA_IMAGE_MAX_BODY_MB       max HTTP request/upload body + external image
                                   fetch cap for http/sse (default 16)
-    PICTURA_IMAGE_UPLOAD_TICKET_TTL  upload_image one-time token TTL, seconds
+    PICTURA_IMAGE_UPLOAD_TOKEN_TTL  upload_image one-time token TTL, seconds
                                   (default 120)
 
 Client-supplied `lora` ids are restricted to the supported LoRA ids in the
@@ -249,55 +249,55 @@ _FETCH_MAX_HOPS = 5
 # against decompression bombs) when loading from uploads / fetched bytes.
 _IMAGE_MAX_PIXELS = 40_000_000
 
-# One-time upload tickets issued by the upload_image MCP tool. token -> expiry
+# One-time upload tokens issued by the upload_image MCP tool. token -> expiry
 # (monotonic); consumed on first use. Only authenticated MCP callers can get a
-# ticket, so POST /images/upload never needs a long-lived key from the client.
-_UPLOAD_TICKET_TTL = max(
-    1.0, float(_env("PICTURA_IMAGE_UPLOAD_TICKET_TTL", "120") or 120)
+# token, so POST /images/upload never needs a long-lived key from the client.
+_UPLOAD_TOKEN_TTL = max(
+    1.0, float(_env("PICTURA_IMAGE_UPLOAD_TOKEN_TTL", "120") or 120)
 )
-_UPLOAD_TICKET_MAX = 1024
-# token -> (expiry, in-flight). An in-flight ticket blocks concurrent POSTs
-# with the same token; the ticket is consumed only after a successful upload
+_UPLOAD_TOKEN_MAX = 1024
+# token -> (expiry, in-flight). An in-flight token blocks concurrent POSTs
+# with the same token; the token is consumed only after a successful upload
 # (failures release it for retry).
-_upload_tickets: dict[str, tuple[float, bool]] = {}
-_upload_tickets_lock = threading.Lock()
+_upload_tokens: dict[str, tuple[float, bool]] = {}
+_upload_tokens_lock = threading.Lock()
 
 
-def _issue_upload_ticket() -> str:
-    """Create a one-time upload ticket with a short TTL (bounds growth)."""
-    with _upload_tickets_lock:
+def _issue_upload_token() -> str:
+    """Create a one-time upload token with a short TTL (bounds growth)."""
+    with _upload_tokens_lock:
         now = time.monotonic()
-        for t in [t for t, (exp, _active) in _upload_tickets.items() if exp < now]:
-            _upload_tickets.pop(t, None)
-        if len(_upload_tickets) >= _UPLOAD_TICKET_MAX:
-            _upload_tickets.clear()
+        for t in [t for t, (exp, _active) in _upload_tokens.items() if exp < now]:
+            _upload_tokens.pop(t, None)
+        if len(_upload_tokens) >= _UPLOAD_TOKEN_MAX:
+            _upload_tokens.clear()
         token = secrets.token_urlsafe(32)
-        _upload_tickets[token] = (now + _UPLOAD_TICKET_TTL, False)
+        _upload_tokens[token] = (now + _UPLOAD_TOKEN_TTL, False)
         return token
 
 
-def _claim_upload_ticket(token: str) -> bool:
-    """Mark a ticket in-flight; False when unknown, expired or already in use."""
+def _claim_upload_token(token: str) -> bool:
+    """Mark a token in-flight; False when unknown, expired or already in use."""
     if not token:
         return False
-    with _upload_tickets_lock:
-        e = _upload_tickets.get(token)
+    with _upload_tokens_lock:
+        e = _upload_tokens.get(token)
         if e is None or e[0] < time.monotonic() or e[1]:
             return False
-        _upload_tickets[token] = (e[0], True)
+        _upload_tokens[token] = (e[0], True)
         return True
 
 
-def _finish_upload_ticket(token: str, success: bool) -> None:
-    """Consume the ticket on success; release it (retryable) on failure."""
+def _finish_upload_token(token: str, success: bool) -> None:
+    """Consume the token on success; release it (retryable) on failure."""
     if not token:
         return
-    with _upload_tickets_lock:
-        e = _upload_tickets.get(token)
+    with _upload_tokens_lock:
+        e = _upload_tokens.get(token)
         if success:
-            _upload_tickets.pop(token, None)
+            _upload_tokens.pop(token, None)
         elif e is not None:
-            _upload_tickets[token] = (e[0], False)
+            _upload_tokens[token] = (e[0], False)
 
 
 class _ImageCache:
@@ -305,7 +305,7 @@ class _ImageCache:
 
     Thread-safe; evicts expired entries lazily and enforces the entry count /
     total-bytes caps (oldest first) so a burst of generations cannot exhaust
-    RAM. Ids are 192-bit unguessable secrets (the URL itself is the ticket).
+    RAM. Ids are 192-bit unguessable secrets (the URL itself is the token).
     """
 
     def __init__(self, max_entries: int, max_total_bytes: int, ttl: float):
@@ -845,7 +845,7 @@ def _build_txt(slot):
             _log("Initial load failed, retrying with alternate precision/variant...")
     if pipe is None:
         raise ValueError(
-            f"{last_err}\n  not provisioned? run: sudo scripts/fetch-models.sh "
+            f"{last_err}\n  not provisioned? run: scripts/fetch-models.sh "
             f"(models dir: {MODELS_ROOT})"
         ) from last_err
     slot.txt = pipe
@@ -870,7 +870,7 @@ def _build_txt(slot):
                 raise ValueError(
                     f"turbo scheduler {_turbo['scheduler']!r}: no "
                     f"scheduler_config.json under {_sched_dir} - run: "
-                    f"sudo scripts/fetch-models.sh (models dir: {MODELS_ROOT})"
+                    f"scripts/fetch-models.sh (models dir: {MODELS_ROOT})"
                 )
         pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             _sched_dir, local_files_only=True
@@ -1627,7 +1627,7 @@ def _apply_turbo_lora(pipe) -> None:
     if not lora_path:
         raise ValueError(
             f"turbo LoRA {turbo!r}: no .safetensors found under {_local_dir(turbo)} - "
-            "not provisioned? run: sudo scripts/fetch-models.sh"
+            "not provisioned? run: scripts/fetch-models.sh"
         )
     with _LORA_LOCK:
         _log("turbo: applying distilled LoRA (scale 1.0)")
@@ -1704,7 +1704,7 @@ def _apply_loras(pipe, spec: str) -> None:
             except Exception as e:  # noqa: BLE001
                 raise ValueError(
                     f"LoRA '{mid}' could not be loaded: {e}\n"
-                    "  not provisioned? run: sudo scripts/fetch-models.sh"
+                    "  not provisioned? run: scripts/fetch-models.sh"
                 ) from e
             names.append(name)
             weights.append(weight)
@@ -1810,7 +1810,7 @@ def _ensure_yolo_pose_local() -> None:
         return
     raise FileNotFoundError(
         f"openpose weights not found at {p} - "
-        "provision with 'sudo scripts/fetch-models.sh'"
+        "provision with 'scripts/fetch-models.sh'"
     )
 
 
@@ -1915,7 +1915,7 @@ def _build_cn(slot, model_id: str):
                 _log("ControlNet build failed, retrying alternate precision/variant...")
         if pipe is None:
             raise ValueError(
-                f"{last_err}\n  not provisioned? run: sudo scripts/fetch-models.sh "
+                f"{last_err}\n  not provisioned? run: scripts/fetch-models.sh "
                 f"(models dir: {MODELS_ROOT})"
             ) from last_err
     # Attention slicing is harmless; VAE slicing/tiling are opt-in (see
@@ -2632,7 +2632,7 @@ def _build_server():
                     ),
                 )
             ]
-        token = _issue_upload_ticket()
+        token = _issue_upload_token()
         base = _PUBLIC_BASE or _request_base(ctx) or _URL_BASE
         if not base:
             return [
@@ -2642,7 +2642,7 @@ def _build_server():
                 )
             ]
         url = f"{base}/images/upload"
-        ttl = int(_UPLOAD_TICKET_TTL)
+        ttl = int(_UPLOAD_TOKEN_TTL)
         target = filename or "<your-image>"
         note = (
             f"Upload reserved (one-time token, valid ~{ttl}s).\n"
@@ -3076,19 +3076,19 @@ def _attach_http_middleware(
     async def _dispatch(request, call_next):
         if request.method == "POST" and request.url.path == "/images/upload":
             auth_ok = _auth_ok(request, token)
-            ticket = ""
+            token = ""
             if not auth_ok:
-                ticket = request.headers.get("x-upload-token", "")
-                if not _claim_upload_ticket(ticket):
+                token = request.headers.get("x-upload-token", "")
+                if not _claim_upload_token(token):
                     return JSONResponse({"error": "unauthorized"}, status_code=401)
             try:
                 resp = await _upload_image(request)
             except BaseException:
                 if not auth_ok:
-                    _finish_upload_ticket(ticket, False)
+                    _finish_upload_token(token, False)
                 raise
             if not auth_ok:
-                _finish_upload_ticket(ticket, resp.status_code == 200)
+                _finish_upload_token(token, resp.status_code == 200)
             return resp
         if request.url.path.startswith("/images/"):
             return await _serve_image(request)

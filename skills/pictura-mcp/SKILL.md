@@ -32,9 +32,9 @@ yourself**: inline base64 (stdio) or a short-lived download URL (http/sse).
 
 Nothing is written to any disk. Save the image yourself:
 
-- **stdio (local)**: base64 `ImageContent` in the result — decode it into a
+- **stdio** (local): base64 `ImageContent` in the result — decode it into a
   PNG at a sensible path (e.g. `./outputs/YYYYMMDD_prompt.png`).
-- **http/sse (remote)**: a short-lived download URL (`.../images/<id>`, ~10
+- **http/sse** (remote): a short-lived download URL (`.../images/<id>`, ~10
   min) — `curl -sSf <url> -o ./outputs/xxx.png`.
 
 Then report the saved path to the user. Never say a file was written unless
