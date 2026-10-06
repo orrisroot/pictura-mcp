@@ -270,9 +270,11 @@ Defaults per model family:
 | Qwen-Image 2.1 (Viggle Turbo) | 1024×1024 | 6 | 1.0 fixed (no CFG, no negative prompt; raw sigma schedule) |
 
 Requested sizes snap to the nearest configured aspect-ratio bucket. The shipped
-presets carry each model's officially recommended ratios: SDXL and SD3.5 use
-9 ratios at ~1MP; Qwen-Image 2.1 uses its 7 recommended ratios at ~1–1.3MP
-(its native 2K variants are omitted — they do not fit 2×3090 model-parallel).
+presets carry each model's officially recommended ratios: SDXL/SD3.5 use 9
+ratios at ~1MP; Qwen-Image 2.1 carries its 7 model-card ratios in both the
+~1MP class (1024² … 1536×864) and the official 2K class (2048×2048 …
+2752×1536). `buckets` is per-deployment configuration: trim it in
+`server/model.json` if the host's VRAM cannot cover a class.
 Off-bucket sizes (e.g. 512×512) produce tiled/duplicated patterns. Lower-VRAM
 cards auto-fall back to CPU offload; CUDA-OOM at runtime also auto-offloads
 and retries.
