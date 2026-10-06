@@ -202,7 +202,7 @@ preset from `server/examples/` or point `PICTURA_MODEL_CONFIG` at it):
   (`sdxl`, `sd35-medium`, `sd35-large`, `qwen-image-2.1`)
 - `vae` — optional custom VAE id (`null` = auto)
 - `families.<id>` — per-family settings: `desc`, `steps`, `guidance`,
-  `width`/`height`, `buckets` (native resolutions; rotations are added
+  `width`/`height`, `buckets` (supported resolutions; rotations are added
   automatically), `auto_vae`, and optionally `turbo`
 - `supported_loras` — id → description map (client-usable LoRAs; `*` = any id)
 - `control_types` — `pre` / `model` / `prep_model` per abstract type
@@ -269,11 +269,14 @@ Defaults per model family:
 | Qwen-Image 2.1 | 1024×1024 | 40 | 1.0 (no CFG; `>1` + negative prompt enables CFG) |
 | Qwen-Image 2.1 (Viggle Turbo) | 1024×1024 | 6 | 1.0 fixed (no CFG, no negative prompt; raw sigma schedule) |
 
-Requested sizes snap to the nearest native training bucket of the active
-model (SDXL ~1MP; SD3.5 up to ~2MP; Qwen-Image 2.1 up to ~2.1MP) — off-bucket
-sizes (e.g. 512×512) produce tiled/duplicated patterns. Lower-VRAM cards
-auto-fall back to CPU offload; CUDA-OOM at runtime also auto-offloads and
-retries.
+Requested sizes snap to the nearest configured aspect-ratio bucket. The shipped
+presets carry each model's officially recommended ratios: SDXL and SD3.5 use
+9 ratios at ~1MP; Qwen-Image 2.1 uses its 7 recommended ratios at ~1–1.3MP
+(its native 2K variants are omitted — they do not fit 2×3090 model-parallel).
+Off-bucket sizes (e.g. 512×512) produce tiled/duplicated patterns. Lower-VRAM
+cards auto-fall back to CPU offload; CUDA-OOM at runtime also auto-offloads
+and retries.
+
 
 ## Image editing (img2img)
 
@@ -289,7 +292,7 @@ retries.
 - **`strength`** (0..1, default 0.6): higher = larger change. Not accepted on
   `qwen-image-2.1` — its edit always runs the full step count.
 - **`width`/`height`** (0 = keep source size; any value snaps to the nearest
-  native bucket — so the output aspect can differ from a non-bucket source).
+  configured bucket — so the output aspect can differ from a non-bucket source).
 
 img2img reuses the loaded pipeline weights (no second model copy). `--smoke`
 also exercises the img2img path.

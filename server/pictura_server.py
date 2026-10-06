@@ -1398,9 +1398,9 @@ def _active_buckets() -> tuple:
 
 def _snap_bucket(width: int, height: int) -> tuple[int, int]:
     """Sanitize a requested size (>= 256, multiple of 8), then snap the pair to
-    the nearest native bucket of the active model family (config-driven).
+    the nearest configured bucket of the active model family (config-driven).
 
-    The request is first scaled to the native bucket area (aspect ratio kept),
+    The request is first scaled to the configured bucket area (aspect ratio kept),
     then the nearest bucket is picked by log-space per-axis distance, so the
     output keeps the requested aspect ratio while staying on a trained bucket
     (e.g. a 1:1 request snaps to the 1024x1024 bucket, not to a near-square).
@@ -1410,7 +1410,7 @@ def _snap_bucket(width: int, height: int) -> tuple[int, int]:
     buckets = _active_buckets()
     if (w, h) in buckets:
         return w, h
-    # Normalize the request to the native bucket area, preserving aspect ratio.
+    # Normalize the request to the configured bucket area, preserving aspect ratio.
     d = _family_defaults()
     scale = math.sqrt((d["w"] * d["h"]) / (w * h))
     tw, th = w * scale, h * scale
@@ -2270,11 +2270,11 @@ def _build_server():
         ] = "",
         width: Annotated[
             int,
-            Field(description=f"Image width in px; 0 = family default ({_fd('desc')}: {_fd('w')}px). Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
+            Field(description=f"Image width in px; 0 = family default ({_fd('desc')}: {_fd('w')}px). Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest configured bucket of {_fd('desc')}."),
         ] = 0,
         height: Annotated[
             int,
-            Field(description=f"Image height in px; 0 = family default ({_fd('desc')}: {_fd('h')}px). Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
+            Field(description=f"Image height in px; 0 = family default ({_fd('desc')}: {_fd('h')}px). Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest configured bucket."),
         ] = 0,
         num_inference_steps: Annotated[
             int,
@@ -2304,7 +2304,7 @@ def _build_server():
         - prompt: what to draw (English works best; be specific).
         - negative_prompt: things to avoid (e.g. "blurry, low quality").
         - width/height: image size in pixels; any positive size is snapped to
-          the nearest native training bucket (multiple of 8, min 256,
+          the nearest configured bucket (multiple of 8, min 256,
           e.g. 1024x1024, 1152x896, 1344x768 and rotations) for best quality.
         - num_inference_steps: 25-40 typical.
         - guidance_scale: how closely to follow the prompt (1..15, ~7.5 default).
@@ -2465,11 +2465,11 @@ def _build_server():
             ] = 0.6,
             width: Annotated[
                 int,
-                Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
+                Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest configured bucket of {_fd('desc')}."),
             ] = 0,
             height: Annotated[
                 int,
-                Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
+                Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest configured bucket."),
             ] = 0,
             num_inference_steps: Annotated[
                 int,
@@ -2551,11 +2551,11 @@ def _build_server():
             ] = "",
             width: Annotated[
                 int,
-                Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket of {_fd('desc')}."),
+                Field(description=f"Target width in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest configured bucket of {_fd('desc')}."),
             ] = 0,
             height: Annotated[
                 int,
-                Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest native training bucket."),
+                Field(description=f"Target height in px; 0 = keep the source size. Positive values are rounded to a multiple of 8 (min 256) and snapped to the nearest configured bucket."),
             ] = 0,
             num_inference_steps: Annotated[
                 int,
@@ -2691,8 +2691,8 @@ def _build_server():
         fam = _model_family()
         _d = _family_defaults()
         lines += [
-            "size_policy=snap to native buckets (>=256, multiple of 8)",
-            f"snap_buckets={len(_active_buckets())} ({fam} native aspect-ratio buckets)",
+            "size_policy=snap to configured buckets (>=256, multiple of 8)",
+            f"snap_buckets={len(_active_buckets())} ({fam} configured aspect-ratio buckets)",
             f"native_size={_d['w']}x{_d['h']} ({fam} default)",
         ]
         return "\n".join(lines)
@@ -2809,7 +2809,7 @@ def _smoke_test() -> int:
             else:
                 raise AssertionError(f"SSRF guard missed internal address {_bad}")
         # Bucket snapping sanity: exact buckets pass through, off-bucket
-        # sizes snap to the nearest official native bucket.
+        # sizes snap to the nearest configured bucket.
         d = _family_defaults()
         _ab = _active_buckets()
         _smallest_square = min(
